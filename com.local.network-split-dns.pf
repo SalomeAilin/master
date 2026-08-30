@@ -1,0 +1,8 @@
+# Standard applications must use the local split-DNS listener.
+pass out quick inet proto { tcp udp } from any to 192.168.1.100 port 53 keep state
+
+# Root-owned network daemons perform the controlled upstream resolution.
+pass out quick inet proto { tcp udp } from any to any port 53 user root keep state
+
+# Prevent normal applications from choosing a public DNS resolver directly.
+block out quick inet proto { tcp udp } from any to any port 53
