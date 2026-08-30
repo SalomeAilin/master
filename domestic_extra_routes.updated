@@ -1,0 +1,16 @@
+# Extra domestic service/CDN endpoints observed behind redirects.
+# Kept separate from the generated China IP list so list updates do not erase them.
+101.47.85.10/32
+98.96.213.145/32
+98.96.242.53/32
+
+# Douyin / ByteDance Hong Kong CDN observed from www.douyin.com on 2026-06-29.
+139.177.246.206/32
+
+# Bilibili short-link CDN observed from b23.tv on 2026-07-05.
+148.153.34.154/32
+148.153.35.66/32
+
+# Douyin p9 image CDN repeatedly resolved here and briefly fell back to Wi-Fi.
+128.14.180.34/32
+128.14.180.35/32
