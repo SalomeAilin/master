@@ -1,0 +1,6 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Generated live status can contain local network details.
+network-split-status.html
