@@ -14,6 +14,7 @@ import time
 DNSMASQ_LOG = "/var/log/dnsmasq-network-split-query.log"
 DNSMASQ_CONFIG = "/usr/local/etc/dnsmasq-network-split.conf"
 LOG_FILE = "/var/log/network-split-dns-event-route-agent.log"
+MAX_DNSMASQ_LOG_BYTES = 64 * 1024 * 1024
 ETH_GATEWAY = "192.168.1.1"
 ETH_INTERFACE = "en0"
 
@@ -151,6 +152,14 @@ def main():
 
             line = stream.readline()
             if not line:
+                if position >= MAX_DNSMASQ_LOG_BYTES:
+                    stream.close()
+                    stream = None
+                    inode = None
+                    os.truncate(DNSMASQ_LOG, 0)
+                    position = 0
+                    logging.info("query log compacted limit_bytes=%s", MAX_DNSMASQ_LOG_BYTES)
+                    continue
                 time.sleep(0.05)
                 continue
             position = stream.tell()
