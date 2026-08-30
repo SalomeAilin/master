@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.network-split-dns-firewall</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>/sbin/pfctl -f /etc/pf.conf &amp;&amp; /sbin/pfctl -E</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/network-split-dns-firewall.out</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/network-split-dns-firewall.err</string>
+</dict>
+</plist>
