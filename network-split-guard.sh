@@ -138,7 +138,15 @@ ensure_dns_responds() {
   attempt=0
 
   while [ "$attempt" -lt 3 ]; do
-    if [ -n "$(first_ipv4 baidu.com)" ] && [ -n "$(first_ipv4 google.com)" ]; then
+    domestic_ip="$(first_ipv4 baidu.com)"
+    foreign_ip=""
+    foreign_required=0
+    if wifi_gateway_ready; then
+      foreign_required=1
+      foreign_ip="$(first_ipv4 google.com)"
+    fi
+
+    if [ -n "$domestic_ip" ] && { [ "$foreign_required" -eq 0 ] || [ -n "$foreign_ip" ]; }; then
       return 0
     fi
 
