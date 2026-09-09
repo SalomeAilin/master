@@ -138,15 +138,7 @@ ensure_dns_responds() {
   attempt=0
 
   while [ "$attempt" -lt 3 ]; do
-    domestic_ip="$(first_ipv4 baidu.com)"
-    foreign_ip=""
-    foreign_required=0
-    if wifi_gateway_ready; then
-      foreign_required=1
-      foreign_ip="$(first_ipv4 google.com)"
-    fi
-
-    if [ -n "$domestic_ip" ] && { [ "$foreign_required" -eq 0 ] || [ -n "$foreign_ip" ]; }; then
+    if dnsmasq_responds; then
       return 0
     fi
 
@@ -163,9 +155,10 @@ ensure_dns_responds() {
   return 1
 }
 
-first_ipv4() {
-  /usr/bin/dig +time=2 +tries=2 +short A @"$DNS_SERVER" "$1" 2>/dev/null | \
-    /usr/bin/awk -F. 'NF == 4 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {print; exit}'
+dnsmasq_responds() {
+  # A non-recursive response proves the local listener is alive without upstream DNS.
+  /usr/bin/dig +time=2 +tries=1 +norecurse +noall +comments A @"$DNS_SERVER" localhost. 2>/dev/null | \
+    /usr/bin/grep -Eq '^;; flags:.*[[:space:]]qr[ ;]'
 }
 
 ipv4s_for_domain() {
