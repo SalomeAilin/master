@@ -4,7 +4,8 @@ cd "${0:A:h}/.."
 
 # Extract only the functions under test; never execute the system guard.
 eval "$(sed -n '/^check_route() {/,/^}/p' network-split-guard.sh | sed 's|/sbin/route|mock_route|g')"
-eval "$(sed -n '/^add_domestic_host_route() {/,/^}/p' network-split-guard.sh | sed 's|/sbin/route|mock_route|g')"
+eval "$(sed -n '/^add_domestic_host_route() {/,/^}/p' network-split-guard.sh | sed 's|/sbin/route|mock_route|g; s|/usr/local/bin/python3 /usr/local/sbin/network_split_policy.py|mock_policy|g')"
+mock_policy() { return 0; }
 trace=$(mktemp)
 trap 'rm -f "$trace"' EXIT
 log() { :; }

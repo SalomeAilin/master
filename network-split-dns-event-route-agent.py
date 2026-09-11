@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import time
+from network_split_policy import allowed
 
 DNSMASQ_LOG = "/var/log/dnsmasq-network-split-query.log"
 DNSMASQ_CONFIG = "/usr/local/etc/dnsmasq-network-split.conf"
@@ -68,6 +69,8 @@ def route_is_ethernet(ip):
 
 
 def bind_ethernet_route(domain, ip):
+    if not allowed(ip):
+        return
     if route_is_ethernet(ip):
         return
     try:

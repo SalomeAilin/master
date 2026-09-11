@@ -9,6 +9,7 @@ DNS_BINARY="/usr/local/sbin/dnsmasq-network-split"
 DNS_LOG="/var/log/dnsmasq-network-split-query.log"
 STAMP="$(/bin/date +%Y%m%d-%H%M%S)"
 
+/usr/bin/install -o root -g wheel -m 644 "$SOURCE_DIR/network_split_policy.py" /usr/local/sbin/network_split_policy.py
 /bin/cp "$SOURCE_DIR/network-split-dns-event-route-agent.py" "$AGENT_TARGET"
 /bin/chmod 755 "$AGENT_TARGET"
 /bin/cp "$SOURCE_DIR/com.local.network-split-dns-event-route-agent.plist" "$PLIST_TARGET"
@@ -21,7 +22,8 @@ STAMP="$(/bin/date +%Y%m%d-%H%M%S)"
 "$DNS_BINARY" --test -C "${DNS_CONFIG}.new"
 /bin/mv "${DNS_CONFIG}.new" "$DNS_CONFIG"
 /usr/bin/touch "$DNS_LOG"
-/bin/chmod 644 "$DNS_LOG"
+/usr/sbin/chown nobody:wheel "$DNS_LOG"
+/bin/chmod 660 "$DNS_LOG"
 
 /bin/launchctl bootout system "$PLIST_TARGET" >/dev/null 2>&1 || true
 /bin/launchctl bootstrap system "$PLIST_TARGET"

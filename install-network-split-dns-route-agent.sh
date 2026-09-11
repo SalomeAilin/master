@@ -9,6 +9,7 @@ DNS_CONFIG="/usr/local/etc/dnsmasq-network-split.conf"
 DNS_BINARY="/usr/local/sbin/dnsmasq-network-split"
 STAMP="$(/bin/date +%Y%m%d-%H%M%S)"
 
+/usr/bin/install -o root -g wheel -m 644 "${0:A:h}/network_split_policy.py" /usr/local/sbin/network_split_policy.py
 /bin/cp "$AGENT_SOURCE" "$AGENT_TARGET"
 /bin/chmod 755 "$AGENT_TARGET"
 /bin/cp "$PLIST_SOURCE" "$PLIST_TARGET"

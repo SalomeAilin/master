@@ -11,8 +11,8 @@ CN_LIST="/usr/local/etc/china_ip_list.txt"
 EXTRA_LIST="/usr/local/etc/domestic_extra_routes.txt"
 DOMAIN_LIST="/usr/local/etc/domestic_domains.conf"
 LOG_FILE="/var/log/china-route.log"
-LOCK_DIR="/tmp/china-route.lock"
-FORCE_REBUILD_FILE="/tmp/china-route-force-rebuild"
+LOCK_FILE="/var/db/china-route.flock"
+FORCE_REBUILD_FILE="/var/db/china-route-force-rebuild"
 HEALTH_CHECK_TARGETS=(223.5.5.5 119.29.29.29 124.237.177.164 139.159.241.37 8.134.50.24)
 MAX_WAIT_SECONDS=120
 SLEEP_SECONDS=5
@@ -47,23 +47,10 @@ wait_for_network() {
   return 1
 }
 
-if ! /bin/mkdir "$LOCK_DIR" 2>/dev/null; then
-  if [ -r "$LOCK_DIR/pid" ]; then
-    old_pid="$(/bin/cat "$LOCK_DIR/pid" 2>/dev/null)"
-    if [ -n "$old_pid" ] && /bin/kill -0 "$old_pid" 2>/dev/null; then
-      exit 0
-    fi
-  fi
-
-  log "removing stale lock: $LOCK_DIR"
-  /bin/rm -rf "$LOCK_DIR"
-  if ! /bin/mkdir "$LOCK_DIR" 2>/dev/null; then
-    log "failed to acquire lock: $LOCK_DIR"
-    exit 1
-  fi
-fi
-/bin/echo "$$" > "$LOCK_DIR/pid"
-trap '/bin/rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
+umask 077
+zmodload zsh/system || exit 1
+: >> "$LOCK_FILE" || exit 1
+zsystem flock -t 0 -f lock_fd "$LOCK_FILE" || exit 0
 
 if [ ! -r "$CN_LIST" ]; then
   log "missing route list: $CN_LIST"
@@ -89,7 +76,7 @@ route_ready() {
 ipv4s_for_domain() {
   /usr/bin/dig +time=2 +tries=2 +short A @"$DNS_SERVER" "$1" 2>/dev/null | \
     /usr/bin/awk -F. 'NF == 4 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {print}' | \
-    /usr/bin/sort -u
+    /usr/bin/sort -u | /usr/local/bin/python3 /usr/local/sbin/network_split_policy.py
 }
 
 routes_healthy() {

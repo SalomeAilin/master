@@ -9,6 +9,7 @@ import struct
 import subprocess
 import tempfile
 import time
+from network_split_policy import allowed
 
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 5353
@@ -120,6 +121,8 @@ def route_is_ethernet(ip):
 
 
 def bind_route(ip):
+    if not allowed(ip):
+        return False, False
     if route_is_ethernet(ip):
         return True, False
     try:
@@ -184,6 +187,9 @@ def handle(packet, state):
     domain = query_name(packet)
     now = time.time()
     for ip, ttl in answers:
+        # Return DNS normally, but never authorize an unrelated global route.
+        if not allowed(ip):
+            continue
         ready, created = bind_route(ip)
         if not ready:
             logging.error("route bind failed domain=%s ip=%s", domain, ip)

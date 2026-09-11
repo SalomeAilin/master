@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>自动分流验证记录 · 2026-09-11</title>
+<style>
+body{margin:0;background:#f5f6f7;color:#202124;font:15px/1.8 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:0}main{max-width:880px;margin:auto;padding:32px 20px}h1{font-size:25px;line-height:1.4}h2{font-size:19px;margin-top:28px}.meta{color:#62676d}.table{overflow:auto}table{width:100%;border-collapse:collapse;background:white}th,td{padding:10px;text-align:left;border-bottom:1px solid #ddd}code{font-size:13px;overflow-wrap:anywhere}li{margin:8px 0}
+</style>
+<main>
+<p class="meta">公开脱敏记录 · 实测时间：2026-09-11 23:39:00–23:39:02 UTC+08:00</p>
+<h1>自动分流已生效的验证证据</h1>
+<p><strong>已证明的范围：</strong>三个实际网站按预期出口访问成功；隔离测试验证了未知域名分类、规则更新保护和境外接口失效后的阻断行为。不能据此推导所有网站零误判或高清视频长期不卡顿。</p>
+<h2>正式服务：TCP 与 TLS 实测</h2>
+<div class="table"><table>
+<thead><tr><th>网站</th><th>实际出口</th><th>证书校验</th><th>HTTP 状态</th><th>到响应头耗时</th></tr></thead>
+<tbody>
+<tr><td>www.douyin.com</td><td>有线 en0</td><td>通过</td><td>200 OK</td><td>0.117 秒</td></tr>
+<tr><td>www.csdn.net</td><td>有线 en0</td><td>通过</td><td>200 OK</td><td>0.685 秒</td></tr>
+<tr><td>github.com</td><td>Wi-Fi en1</td><td>通过</td><td>200 OK</td><td>1.147 秒</td></tr>
+</tbody></table></div>
+<p>通过正式代理建立指定域名的 CONNECT 和经过证书校验的 TLS 连接，在保持连接时比较代理进程的内核 TCP 套接字。每个样本只有一个新增外部 TCP 候选；同时按客户端端口关联日志连接 ID，核对域名及出口。接口地址由 ifconfig 交叉确认。耗时包含套接字检查，不是纯网络延迟或视频速度。</p>
+<p><strong>CSDN 不在本地手工覆盖名单中：</strong>它由国内域名规则库自动匹配，实际连接使用有线，证明自动规则参与了真实请求的分流。</p>
+<h2>隔离实例：逻辑和故障测试</h2>
+<ul>
+<li>未知域名解析到国内 IP 时选择有线，解析到境外 IP 时选择 Wi-Fi。测试移除旧静态 IP 列表，使用测试 GeoIP 规则和本地 DNS 数据。</li>
+<li>给 GitHub 模拟国内 IP，仍选择 Wi-Fi；给抖音模拟境外 IP，仍选择有线。已知域名归属优先于 IP 推断。</li>
+<li>规则更新影响新连接；损坏更新保留有效规则；关闭更新服务器、删除种子文件后仍可从缓存启动。</li>
+<li>把隔离实例的境外数据、DNS 和下载接口设为不存在的接口，GitHub 请求失败，真实抖音请求仍能通过有线成功。没有关闭本机 Wi-Fi。</li>
+<li>陌生域名返回内网地址时拒绝连接。已确认正式配置等于当前测试构建程序的输出。</li>
+</ul>
+<h2>实现与验证边界</h2>
+<p>使用 sing-box 1.14.0，国内外域名和中国 IP 规则库每小时检查更新，按新连接实时匹配。用户选择了“未知域名按 IP 判断”的策略：未知的境外网站使用国内 CDN 时可能被判为国内，反向情况同样存在。混合 DNS 地址也需单独核对。程序不解密网页 TLS，不修改全局路由以学习未知网站。</p>
+<p>部署中观察到首次后台更新被网络初始化取消，以及 launchd 重载时序错误。已增加切换前缓存预热和有次数限制的启动重试。缓存和初始规则提供启动保障；若缓存丢失且首次更新失败，使用初始规则，下一更新周期再尝试。这不是“任何情况下永不出错”的保证。</p>
+<p>没有完成物理断开 Wi-Fi、高清切换、快进、视频缓冲或长时间播放验收。WebRTC、不遵循系统代理的应用及绕过代理的连接不属于该域名代理的完整覆盖范围。历史 DNS 动态路由的清理仍需按所有权逐项核实，未宣称安全迁移全部完成。</p>
+<h2>可复现测试</h2>
+<ul>
+<li><code>python3 -B tests/domain_proxy.py</code>：配置回归。</li>
+<li><code>python3 -B tests/domain_proxy_deploy.py</code>：部署回滚与启动重试。</li>
+<li><code>python3 -B tests/domain_proxy_automatic.py &lt;sing-box-binary&gt;</code>：实际引擎的隔离分类、热更新和缓存测试。</li>
+<li><code>python3 -B tests/domain_proxy_failclosed.py &lt;sing-box-binary&gt;</code>：隔离接口故障注入，依赖本机规则种子与国内网络。</li>
+<li><code>python3 -B tests/domain_proxy_live_evidence.py</code>：需要管理员权限读取内核套接字和私有日志，仅做只读检查；原始输出应留在本地。</li>
+</ul>
+<p class="meta">公开记录未包含本机 IP、临时连接端口、进程 ID、MAC 地址、完整浏览日志或身份凭据。程序所需的配置参数不属于此记录的脱敏范围。</p>
+</main>
+</html>

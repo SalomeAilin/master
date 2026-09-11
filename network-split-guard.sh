@@ -20,7 +20,7 @@ DNSMASQ_CELLAR_DIR="/opt/homebrew/Cellar/dnsmasq"
 CHINA_ROUTE_LABEL="com.local.china-route"
 EXTRA_ROUTE_LIST="/usr/local/etc/domestic_extra_routes.txt"
 DOMESTIC_DOMAIN_LIST="/usr/local/etc/domestic_domains.conf"
-FORCE_REBUILD_FILE="/tmp/china-route-force-rebuild"
+FORCE_REBUILD_FILE="/var/db/china-route-force-rebuild"
 LOG_FILE="/var/log/network-split-guard.log"
 MAX_WAIT_SECONDS=60
 SLEEP_SECONDS=3
@@ -245,6 +245,8 @@ add_domestic_host_route() {
   local domain="$1" ip="$2"
   local before add_error
 
+  /usr/local/bin/python3 /usr/local/sbin/network_split_policy.py "$ip" || return 0
+
   before="$(/sbin/route -n get "$ip" 2>/dev/null | /usr/bin/awk '
     /gateway:/{gateway=$2}
     /interface:/{iface=$2}
@@ -299,6 +301,8 @@ check_domestic_domain() {
 
   ips=("${(@f)ips_text}")
   for ip in $ips; do
+    # Policy rejection is not a DNS failure and must not trigger route repair.
+    /usr/local/bin/python3 /usr/local/sbin/network_split_policy.py "$ip" || continue
     if ! check_route "$ip" "$ETH_GW" "$ETH_IF"; then
       log "domestic domain route drift domain=$domain ip=$ip"
       add_domestic_host_route "$domain" "$ip" || return 1
