@@ -168,12 +168,13 @@ ipv4s_for_domain() {
 }
 
 check_route() {
-  target="$1"
-  expected_gateway="$2"
-  expected_iface="$3"
+  local target="$1" expected_gateway="$2" expected_iface="$3"
+  local route_info iface gateway
 
-  iface="$(/sbin/route -n get "$target" 2>/dev/null | /usr/bin/awk '/interface:/{print $2; exit}')"
-  gateway="$(/sbin/route -n get "$target" 2>/dev/null | /usr/bin/awk '/gateway:/{print $2; exit}')"
+  # Keep gateway and interface from the same snapshot during network changes.
+  route_info="$(/sbin/route -n get "$target" 2>/dev/null)" || return 1
+  iface="$(/usr/bin/awk '/interface:/{print $2; exit}' <<< "$route_info")"
+  gateway="$(/usr/bin/awk '/gateway:/{print $2; exit}' <<< "$route_info")"
 
   if [ "$iface" != "$expected_iface" ] || [ "$gateway" != "$expected_gateway" ]; then
     log "route drift target=$target gateway=$gateway interface=$iface expected_gateway=$expected_gateway expected_interface=$expected_iface"
@@ -241,14 +242,19 @@ foreign_default_route_active() {
 }
 
 add_domestic_host_route() {
-  domain="$1"
-  ip="$2"
+  local domain="$1" ip="$2"
+  local before add_error
 
   before="$(/sbin/route -n get "$ip" 2>/dev/null | /usr/bin/awk '
     /gateway:/{gateway=$2}
     /interface:/{iface=$2}
     END{print gateway "/" iface}
   ')"
+
+  # The DNS route agent may have repaired this destination since the check.
+  if [ "$before" = "${ETH_GW}/${ETH_IF}" ]; then
+    return 0
+  fi
 
   /sbin/route -n delete -host -ifscope "$WIFI_IF" "$ip" "$WIFI_GW" >/dev/null 2>&1 || true
   /sbin/route -n delete -host "$ip" "$WIFI_GW" >/dev/null 2>&1 || true
