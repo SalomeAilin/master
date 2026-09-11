@@ -13,7 +13,7 @@ DOMAIN_LIST="/usr/local/etc/domestic_domains.conf"
 LOG_FILE="/var/log/china-route.log"
 LOCK_DIR="/tmp/china-route.lock"
 FORCE_REBUILD_FILE="/tmp/china-route-force-rebuild"
-HEALTH_CHECK_TARGETS="223.5.5.5 119.29.29.29 124.237.177.164 139.159.241.37 8.134.50.24"
+HEALTH_CHECK_TARGETS=(223.5.5.5 119.29.29.29 124.237.177.164 139.159.241.37 8.134.50.24)
 MAX_WAIT_SECONDS=120
 SLEEP_SECONDS=5
 

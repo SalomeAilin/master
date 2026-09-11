@@ -11,17 +11,21 @@ PROBE_DOMAIN="live.douyin.com"
 PROBE_URL="https://live.douyin.com/"
 MAX_SECONDS="4.0"
 STATE_FILE="/var/db/network-split-domestic-health.state"
-LOCK_DIR="/var/run/network-split-domestic-health.lock"
+LOCK_FILE="/var/run/network-split-domestic-health.flock"
 LOG_FILE="/var/log/network-split-domestic-health.log"
 
 log() {
   /bin/echo "$(/bin/date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"
 }
 
-if ! /bin/mkdir "$LOCK_DIR" 2>/dev/null; then
-  exit 0
+# Kernel lock is released even if this process is killed without cleanup.
+umask 077
+zmodload zsh/system || exit 1
+: >> "$LOCK_FILE" || exit 1
+if ! zsystem flock -t 0 -f lock_fd "$LOCK_FILE"; then
+  log "probe skipped: lock busy or unavailable"
+  exit 1
 fi
-trap '/bin/rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 failure_count=0
 if [ -r "$STATE_FILE" ]; then

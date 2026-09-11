@@ -294,7 +294,7 @@ check_domestic_domain() {
 
   if [ -z "$ips_text" ]; then
     log "failed to resolve domestic domain=$domain via_dns=$DNS_SERVER"
-    return 1
+    return 2
   fi
 
   ips=("${(@f)ips_text}")
@@ -309,21 +309,26 @@ check_domestic_domain() {
 }
 
 check_domestic_domains() {
+  local domain result bad_routes=0
   if [ ! -r "$DOMESTIC_DOMAIN_LIST" ]; then
     for domain in baidu.com bilibili.com console.volcengine.com alsay.net pan.baidu.com yun.baidu.com pcs.baidu.com d.pcs.baidu.com baidupcs.com qd.baidupcs.com bj.baidupcs.com; do
-      check_domestic_domain "$domain" || return 1
+      check_domestic_domain "$domain"
+      result=$?
+      [ "$result" -eq 1 ] && bad_routes=1
     done
-    return 0
+    return "$bad_routes"
   fi
 
   while IFS= read -r domain; do
     domain="$(/bin/echo "$domain" | /usr/bin/sed 's/[[:space:]]*#.*$//;s/^[[:space:]]*//;s/[[:space:]]*$//')"
     [ -z "$domain" ] && continue
 
-    check_domestic_domain "$domain" || return 1
+    check_domestic_domain "$domain"
+    result=$?
+    [ "$result" -eq 1 ] && bad_routes=1
   done < "$DOMESTIC_DOMAIN_LIST"
 
-  return 0
+  return "$bad_routes"
 }
 
 china_route_running() {
@@ -525,7 +530,8 @@ remove_foreign_block_routes() {
   [ "$high_active" -eq 1 ] &&
     /sbin/route -n delete -net 128.0.0.0/1 "$FOREIGN_BLOCK_GW" >/dev/null 2>&1 || true
 
-  if foreign_block_routes_active; then
+  if foreign_block_route_active "$FOREIGN_BLOCK_LOW_SAMPLE" ||
+    foreign_block_route_active "$FOREIGN_BLOCK_HIGH_SAMPLE"; then
     log "failed to remove foreign fallback block after wifi recovered"
     return 1
   fi
@@ -568,38 +574,39 @@ wifi_gateway_ready() {
 }
 
 ensure_foreign_default_route() {
+  local log_unavailable route_info default_gateway default_iface
+  local target_wifi_gateway actual_gateway actual_iface
   log_unavailable="${1:-log}"
   route_info="$(read_default_route)"
   default_gateway="$(/bin/echo "$route_info" | /usr/bin/awk '{print $1}')"
   default_iface="$(/bin/echo "$route_info" | /usr/bin/awk '{print $2}')"
 
   if ! wifi_gateway_ready; then
+    ensure_foreign_block_routes || return 1
     ensure_wired_fallback_route >/dev/null 2>&1 || true
-    ensure_foreign_block_routes >/dev/null 2>&1 || true
     log_if_not_quiet "$log_unavailable" "wifi unavailable; foreign fallback blocked while domestic sites use wired default_gateway=$default_gateway default_interface=$default_iface wired=${ETH_GW}/${ETH_IF}"
     return 1
   fi
 
-  if ! remove_foreign_block_routes; then
-    log_if_not_quiet "$log_unavailable" "wifi available but foreign fallback block could not be removed"
-    return 1
-  fi
-
-  if default_route_ok "$default_gateway" "$default_iface"; then
-    return 0
-  fi
-
   target_wifi_gateway="$(active_wifi_gateway 2>/dev/null || true)"
   if [ -z "$target_wifi_gateway" ]; then
+    ensure_foreign_block_routes || return 1
     ensure_wired_fallback_route >/dev/null 2>&1 || true
-    ensure_foreign_block_routes >/dev/null 2>&1 || true
     log_if_not_quiet "$log_unavailable" "wifi gateway not discoverable; foreign fallback blocked while domestic sites use wired default_gateway=$default_gateway default_interface=$default_iface wired=${ETH_GW}/${ETH_IF}"
     return 1
   fi
 
+  if default_route_matches "$target_wifi_gateway" "$WIFI_IF"; then
+    remove_foreign_block_routes
+    return $?
+  fi
+
+  # Keep the block until the Wi-Fi default is installed and verified.
+  ensure_foreign_block_routes || return 1
   rebuild_default_route "$target_wifi_gateway" "$WIFI_IF" "wifi_foreign" "$default_gateway" || true
 
   if default_route_matches "$target_wifi_gateway" "$WIFI_IF"; then
+    remove_foreign_block_routes || return 1
     log_if_not_quiet "$log_unavailable" "restored wifi route for foreign sites from=${default_gateway}/${default_iface} to=${target_wifi_gateway}/${WIFI_IF}"
     return 0
   fi
