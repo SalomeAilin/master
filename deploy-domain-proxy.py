@@ -177,7 +177,7 @@ def main():
     elif args.action == "install":
         if Path(PLIST).exists():
             raise RuntimeError("Service already installed; refusing implicit replacement")
-        binary = root / "sing-box-1.14.0-darwin-arm64/sing-box"
+        binary = root / "sing-box-1.14.2-darwin-arm64/sing-box"
         run(str(binary), "check", "-c", str(root / "config.json"))
         libexec = Path("/usr/local/libexec")
         if not libexec.exists():

@@ -1,8 +1,10 @@
 """Offline regression tests; all route commands are mocked."""
 
 import importlib.util
+import logging
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import mock_open, patch
 
@@ -20,6 +22,30 @@ def module(filename):
 
 event = module("network-split-dns-event-route-agent.py")
 proxy = module("network-split-dns-route-agent.py")
+
+
+class LogRotationTests(unittest.TestCase):
+    def test_event_log_follows_new_file_after_external_rotation(self):
+        root = logging.getLogger()
+        previous_handlers, previous_level = root.handlers[:], root.level
+        root.handlers = []
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                current = Path(directory) / "event.log"
+                archive = Path(directory) / "event.log.0"
+                with patch.object(event, "LOG_FILE", str(current)):
+                    event.setup_logging()
+                    logging.info("before rotation")
+                    current.rename(archive)
+                    current.touch()
+                    logging.info("after rotation")
+                self.assertIn("before rotation", archive.read_text())
+                self.assertNotIn("after rotation", archive.read_text())
+                self.assertIn("after rotation", current.read_text())
+        finally:
+            for handler in root.handlers:
+                handler.close()
+            root.handlers, root.level = previous_handlers, previous_level
 
 
 class SecurityTests(unittest.TestCase):

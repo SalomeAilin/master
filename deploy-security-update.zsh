@@ -3,7 +3,11 @@
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { print -u2 'Administrator authorization required'; exit 1; }
 source_dir=${0:A:h}
-files=(network_split_policy.py network-split-dns-event-route-agent.py network-split-dns-route-agent.py china-route.sh network-split-guard.sh)
+files=(network_split_policy.py network-split-dns-event-route-agent.py china-route.sh network-split-guard.sh)
+# Keep legacy installations patchable without reinstalling a retired service.
+if /bin/launchctl print system/com.local.network-split-dns-route-agent >/dev/null 2>&1; then
+  files+=(network-split-dns-route-agent.py)
+fi
 for file in $files; do
   [[ -f "$source_dir/$file" ]] || exit 1
 done
@@ -47,4 +51,4 @@ done
 for file in $files; do
   /usr/bin/cmp "$source_dir/$file" "/usr/local/sbin/$file"
 done
-print "Installed and compared all five files. Backup: $backup"
+print "Installed and compared ${#files} files. Backup: $backup"

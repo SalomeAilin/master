@@ -6,6 +6,7 @@ normally and the existing route guard remains the fallback.
 """
 
 import logging
+from logging.handlers import WatchedFileHandler
 import os
 import re
 import subprocess
@@ -26,7 +27,7 @@ IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
 
 def setup_logging():
     logging.basicConfig(
-        filename=LOG_FILE,
+        handlers=[WatchedFileHandler(LOG_FILE, encoding="utf-8")],
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )

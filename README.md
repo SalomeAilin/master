@@ -32,8 +32,8 @@ Sources: [sing-geosite](https://github.com/SagerNet/sing-geosite),
 [sing-geoip](https://github.com/SagerNet/sing-geoip), and
 [native rule-set updates](https://sing-box.sagernet.org/configuration/rule-set/).
 
-This uses the official sing-box 1.14.0 darwin-arm64 release, archive SHA-256
-`a150c94012ff768b7261939cd236b9c8554127f45137230295d23a5660225cc9`.
+This uses the official sing-box 1.14.2 darwin-arm64 release, archive SHA-256
+`925c5382eca8492b0150f868a6db20b18290a38700e621724b3703fd453e032d`.
 There is no TLS interception, remote proxy server, TUN, or route-table mutation.
 The service runs as `nobody` and keeps up to four 2 MiB private log files under
 `/var/log/network-domain-proxy`. Existing DNS and IP guards remain for clients
@@ -84,6 +84,33 @@ ephemeral ports, process IDs and full browsing logs are intentionally not publis
 Reproduce the read-only live check locally with administrator authorization:
 `python3 -B tests/domain_proxy_live_evidence.py`. Keep its raw output private.
 
+## Log Retention
+
+The system configuration `/etc/newsyslog.d/network-split.conf` retains the existing route-guard,
+China-route, and DNS-event-agent rules and adds rotation for the domestic
+health check: 1 MiB with five archives for its main log, and 256 KiB with
+three archives each for health-check and route-guard stdout and stderr.
+The DNS event agent uses `WatchedFileHandler` so it reopens the current log
+after external rotation instead of continuing to write into an archive.
+Same-process reopening was verified on the live service on 2026-09-25.
+macOS runs `newsyslog`
+hourly at minute 30, so these thresholds are checked periodically rather
+than enforced as hard byte caps. The first health-log rotation was triggered
+and verified on 2026-09-25; the previous log was retained as `.log.0`. Do not
+manually remove the dnsmasq query log: the live DNS event agent consumes it
+for route decisions.
+
+| Source | Purpose | Retention / status |
+| --- | --- | --- |
+| `dnsmasq-network-split-query.log` | Live input for domestic DNS route decisions | Agent compacts after consuming the file at 64 MiB; this is not a hard cap if the consumer stops or falls behind |
+| `network-split-guard.log`, `china-route.log` | Route drift and recovery evidence | `newsyslog`: 1 MiB threshold, ten archives each |
+| `network-split-dns-event-route-agent.log` | DNS-derived route changes and observer errors | `newsyslog`: 1 MiB threshold, five archives |
+| `network-split-domestic-health.log` | Domestic HTTP probe failures and recovery | `newsyslog`: 1 MiB threshold, five archives |
+| `network-domain-proxy/service.log` | Domain routing and proxy connection errors | Existing proxy supervisor: 2 MiB threshold, three archives |
+| Guard and health `.out` / `.err` | Short-lived job output and startup failures | `newsyslog`: 256 KiB threshold, three archives each |
+| DNS event agent `.out` / `.err` | Long-lived process startup/output channels | Presently empty; not covered by the main-log rotation guarantee |
+| Old DNS route-agent and DNS firewall logs | Historical diagnostics | Corresponding jobs are not loaded as of 2026-09-25; preserve pending archive review |
+
 Additional tests: `python3 -B tests/domain_proxy.py`,
 `python3 -B tests/domain_proxy_deploy.py`,
 `python3 -B tests/domain_proxy_automatic.py <sing-box-binary>` and
@@ -112,8 +139,51 @@ engine tests, not proof of production video playback quality.
 - `china_ip_list.txt` -> `/usr/local/etc/`
 - `domestic_domains.conf` -> `/usr/local/etc/`
 - `domestic_extra_routes.txt` -> `/usr/local/etc/`
-- `com.local.*.plist` -> `/Library/LaunchDaemons/`
+- `com.local.china-route.plist` -> `/Library/LaunchDaemons/`
+- `com.local.network-split-guard.plist` -> `/Library/LaunchDaemons/`
+- `com.local.network-split-domestic-health.plist` -> `/Library/LaunchDaemons/`
+- `com.local.network-split-dns-event-route-agent.plist` -> `/Library/LaunchDaemons/`
+- `com.local.network-domain-proxy.plist` -> `/Library/LaunchDaemons/`
 - `homebrew.mxcl.dnsmasq.plist` -> `/Library/LaunchDaemons/`
+
+The older `com.local.network-split-dns-route-agent` and
+`com.local.network-split-dns-firewall` jobs are not loaded or installed as
+LaunchDaemons on 2026-09-25. Their repository files and installers are
+historical material, not part of the active mapping. The old DNS route-agent
+source is retained for regression tests and updates of machines still running
+that legacy service. The security-update installer deploys it only when that
+service is loaded; it must not recreate an unused executable on this Mac. Do not restore
+every `com.local.*.plist` as a group: that would reintroduce these older jobs.
+
+On 2026-09-25, the unused deployed
+`/usr/local/sbin/network-split-dns-route-agent.py` was removed after checking
+service references and matching its contents to the retained repository source.
+The installed `network-domain-proxy-deploy.py` was synchronized with
+`deploy-domain-proxy.py`, including the 1.14.2 installation-package path.
+Byte comparison passed; running proxy/DNS/event-agent PIDs and start times
+were unchanged. The task-specific staging directory was removed after verification.
+
+### Script Roles
+
+| Role | Files | Use on this Mac |
+| --- | --- | --- |
+| Runtime | `network-domain-proxy-run.py`, `network-split-dns-event-route-agent.py`, `network-split-guard.sh`, `china-route.sh`, `network-split-domestic-health.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
+| Shared dependency | `network_split_policy.py` | Required by the event agent and both routing scripts; not a redundant daemon |
+| Maintenance | `build-domain-proxy.py`, `deploy-domain-proxy.py`, `deploy-security-update.zsh`, `install-network-split-dns-event-route-agent.sh` | Manual build, deployment and installation tools, not background jobs; installation can restart services |
+| Legacy implementation | `network-split-dns-route-agent.py`, `install-network-split-dns-route-agent.sh` | Not used by the current services; the source remains covered by offline tests; do not run the old installer on this Mac |
+| Legacy firewall tools | `install-network-split-dns-no-bypass.sh`, `remove-network-split-dns-firewall.sh` | Historical PF setup and rollback, not current maintenance entrypoints; neither should be run for normal troubleshooting |
+| Verification | The nine files in `tests/` | Retained tests, not launchd jobs; `domain_proxy_live_evidence.py` accesses the live network and requires administrator authorization |
+
+Source/deployed copies have different roles: the repository is the editable
+source; `/usr/local/sbin` is the launchd execution location. Compare their
+contents before deployment rather than treating either location as disposable.
+This inventory establishes roles and references, not playback stability.
+
+On 2026-09-25, 25 inactive `.bak` files were moved out of `/usr/local/sbin`
+and `/Library/LaunchDaemons` into the root-private archive
+`/var/backups/network-split/retired.pMQuNgn3`. Its `SHA256SUMS` records their
+original relative paths; all 25 archived files passed verification. Current
+programs and launchd configurations stayed in place.
 
 Review interface names, gateways, DNS addresses, ownership, and launchd state
 before restoring on another Mac or after a major network topology change.

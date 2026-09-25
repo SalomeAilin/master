@@ -35,3 +35,15 @@ DNS_SERVER=192.168.1.100
 if check_domestic_domain missing.cn; then exit 1; else [[ $? = 2 ]]; fi
 [[ -s "$trace" ]]
 print 'PASS actual empty DNS response remains distinguishable'
+
+# Exercise only deployment selection, with launchd mocked and no installation.
+selection=$(sed -n '/^files=(/,/^for file in \$files; do/{ /^for file in \$files; do/!p; }' deploy-security-update.zsh)
+selection=${selection//\/bin\/launchctl/mock_launchctl}
+mock_launchctl() { return 1; }
+eval "$selection"
+[[ ${#files} = 4 && ${files[(Ie)network-split-dns-route-agent.py]} = 0 ]]
+print 'PASS inactive legacy DNS agent is not redeployed'
+mock_launchctl() { return 0; }
+eval "$selection"
+[[ ${#files} = 5 && ${files[(Ie)network-split-dns-route-agent.py]} != 0 ]]
+print 'PASS enabled legacy DNS agent still receives security updates'
