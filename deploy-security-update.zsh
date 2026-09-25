@@ -4,10 +4,6 @@ set -euo pipefail
 [[ $EUID -eq 0 ]] || { print -u2 'Administrator authorization required'; exit 1; }
 source_dir=${0:A:h}
 files=(network_split_policy.py network-split-dns-event-route-agent.py china-route.sh network-split-guard.sh)
-# Keep legacy installations patchable without reinstalling a retired service.
-if /bin/launchctl print system/com.local.network-split-dns-route-agent >/dev/null 2>&1; then
-  files+=(network-split-dns-route-agent.py)
-fi
 for file in $files; do
   [[ -f "$source_dir/$file" ]] || exit 1
 done
@@ -43,11 +39,10 @@ for file in $files; do
 done
 /usr/sbin/chown nobody:wheel /var/log/dnsmasq-network-split-query.log
 /bin/chmod 660 /var/log/dnsmasq-network-split-query.log
-for label in com.local.network-split-dns-event-route-agent com.local.network-split-dns-route-agent; do
-  if /bin/launchctl print "system/$label" >/dev/null 2>&1; then
-    /bin/launchctl kickstart -k "system/$label"
-  fi
-done
+label=com.local.network-split-dns-event-route-agent
+if /bin/launchctl print "system/$label" >/dev/null 2>&1; then
+  /bin/launchctl kickstart -k "system/$label"
+fi
 for file in $files; do
   /usr/bin/cmp "$source_dir/$file" "/usr/local/sbin/$file"
 done

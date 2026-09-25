@@ -21,7 +21,6 @@ def module(filename):
 
 
 event = module("network-split-dns-event-route-agent.py")
-proxy = module("network-split-dns-route-agent.py")
 
 
 class LogRotationTests(unittest.TestCase):
@@ -79,25 +78,30 @@ class SecurityTests(unittest.TestCase):
                 event.process_line(line, {"cn"}, aliases, queries)
             run.assert_not_called()
 
-    def test_both_sinks_enforce_policy_before_route_lookup(self):
-        for agent, call in ((event, lambda: event.bind_ethernet_route("evil.cn", "8.8.8.8")),
-                            (proxy, lambda: proxy.bind_route("8.8.8.8"))):
-            with patch.object(agent.subprocess, "run") as run:
-                call()
+    def test_event_sink_enforces_policy_before_route_lookup(self):
+        for ip in ("8.8.8.8", "127.0.0.1", "999.1.1.1"):
+            with self.subTest(ip=ip), patch.object(event, "route_is_ethernet") as lookup, patch.object(event.subprocess, "run") as run:
+                event.bind_ethernet_route("evil.cn", ip)
+                lookup.assert_not_called()
                 run.assert_not_called()
 
     def test_legitimate_bind_still_uses_ifp(self):
-        for agent, call in ((event, lambda: event.bind_ethernet_route("good.cn", "223.5.5.5")),
-                            (proxy, lambda: proxy.bind_route("223.5.5.5"))):
-            with patch.object(agent, "route_is_ethernet", side_effect=[False, True]), patch.object(agent.subprocess, "run") as run:
-                run.return_value.returncode = 0
-                call()
-                self.assertIn(["/sbin/route", "-n", "add", "-host", "223.5.5.5", "192.168.1.1", "-ifp", "en0"], [c.args[0] for c in run.call_args_list])
+        with patch.object(event, "route_is_ethernet", side_effect=[False, True]), patch.object(event.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            event.bind_ethernet_route("good.cn", "223.5.5.5")
+            self.assertIn(["/sbin/route", "-n", "add", "-host", "223.5.5.5", "192.168.1.1", "-ifp", "en0"], [c.args[0] for c in run.call_args_list])
 
-    def test_proxy_preserves_dns_without_unauthorized_route(self):
-        with patch.object(proxy, "forward", return_value=b"response"), patch.object(proxy, "ipv4_answers", return_value=[("8.8.8.8", 60)]), patch.object(proxy, "bind_route") as bind:
-            self.assertEqual(proxy.handle(b"query", {}), b"response")
-            bind.assert_not_called()
+    def test_denied_answer_does_not_block_later_domestic_answer(self):
+        with patch.object(event, "route_is_ethernet", return_value=True) as lookup, patch.object(event.subprocess, "run") as run:
+            queries, aliases = {}, {}
+            event.process_line("dnsmasq[1]: 7 client query[A] good.cn from client", {"cn"}, aliases, queries)
+            event.process_line("dnsmasq[1]: 7 client reply good.cn is 8.8.8.8", {"cn"}, aliases, queries)
+            lookup.assert_not_called()
+            run.assert_not_called()
+            self.assertEqual(queries["7"][0], "good.cn")
+            event.process_line("dnsmasq[1]: 7 client reply good.cn is 223.5.5.5", {"cn"}, aliases, queries)
+            lookup.assert_called_once_with("223.5.5.5")
+            run.assert_not_called()
 
     def test_coordination_and_log_permissions(self):
         china = (ROOT / "china-route.sh").read_text()

@@ -86,19 +86,13 @@ Reproduce the read-only live check locally with administrator authorization:
 
 ## Log Retention
 
-The system configuration `/etc/newsyslog.d/network-split.conf` retains the existing route-guard,
-China-route, and DNS-event-agent rules and adds rotation for the domestic
-health check: 1 MiB with five archives for its main log, and 256 KiB with
-three archives each for health-check and route-guard stdout and stderr.
+The system configuration `/etc/newsyslog.d/network-split.conf` controls rotation
+for the route guard, China routes, DNS event agent, and domestic health check.
 The DNS event agent uses `WatchedFileHandler` so it reopens the current log
 after external rotation instead of continuing to write into an archive.
-Same-process reopening was verified on the live service on 2026-09-25.
-macOS runs `newsyslog`
-hourly at minute 30, so these thresholds are checked periodically rather
-than enforced as hard byte caps. The first health-log rotation was triggered
-and verified on 2026-09-25; the previous log was retained as `.log.0`. Do not
-manually remove the dnsmasq query log: the live DNS event agent consumes it
-for route decisions.
+macOS runs `newsyslog` hourly at minute 30, so these thresholds are checked
+periodically rather than enforced as hard byte caps. Do not manually remove
+the dnsmasq query log: the live DNS event agent consumes it for route decisions.
 
 | Source | Purpose | Retention / status |
 | --- | --- | --- |
@@ -109,7 +103,6 @@ for route decisions.
 | `network-domain-proxy/service.log` | Domain routing and proxy connection errors | Existing proxy supervisor: 2 MiB threshold, three archives |
 | Guard and health `.out` / `.err` | Short-lived job output and startup failures | `newsyslog`: 256 KiB threshold, three archives each |
 | DNS event agent `.out` / `.err` | Long-lived process startup/output channels | Presently empty; not covered by the main-log rotation guarantee |
-| Old DNS route-agent and DNS firewall logs | Historical diagnostics | Corresponding jobs are not loaded as of 2026-09-25; preserve pending archive review |
 
 Additional tests: `python3 -B tests/domain_proxy.py`,
 `python3 -B tests/domain_proxy_deploy.py`,
@@ -133,7 +126,7 @@ engine tests, not proof of production video playback quality.
 - `network-split-guard.sh` -> `/usr/local/sbin/network-split-guard.sh`
 - `china-route.sh` -> `/usr/local/sbin/china-route.sh`
 - `network-split-dns-event-route-agent.py` -> `/usr/local/sbin/`
-- `network_split_policy.py` -> `/usr/local/sbin/` (required by both DNS agents and shell guards)
+- `network_split_policy.py` -> `/usr/local/sbin/` (required by the DNS event agent and shell guards)
 - `network-split-domestic-health.sh` -> `/usr/local/sbin/`
 - `dnsmasq-network-split.conf` -> `/usr/local/etc/`
 - `china_ip_list.txt` -> `/usr/local/etc/`
@@ -146,22 +139,8 @@ engine tests, not proof of production video playback quality.
 - `com.local.network-domain-proxy.plist` -> `/Library/LaunchDaemons/`
 - `homebrew.mxcl.dnsmasq.plist` -> `/Library/LaunchDaemons/`
 
-The older `com.local.network-split-dns-route-agent` and
-`com.local.network-split-dns-firewall` jobs are not loaded or installed as
-LaunchDaemons on 2026-09-25. Their repository files and installers are
-historical material, not part of the active mapping. The old DNS route-agent
-source is retained for regression tests and updates of machines still running
-that legacy service. The security-update installer deploys it only when that
-service is loaded; it must not recreate an unused executable on this Mac. Do not restore
-every `com.local.*.plist` as a group: that would reintroduce these older jobs.
-
-On 2026-09-25, the unused deployed
-`/usr/local/sbin/network-split-dns-route-agent.py` was removed after checking
-service references and matching its contents to the retained repository source.
-The installed `network-domain-proxy-deploy.py` was synchronized with
-`deploy-domain-proxy.py`, including the 1.14.2 installation-package path.
-Byte comparison passed; running proxy/DNS/event-agent PIDs and start times
-were unchanged. The task-specific staging directory was removed after verification.
+Deploy only the files listed in the active mapping. Retired implementations
+remain available in Git history, not in the current deployment or test suite.
 
 ### Script Roles
 
@@ -170,20 +149,12 @@ were unchanged. The task-specific staging directory was removed after verificati
 | Runtime | `network-domain-proxy-run.py`, `network-split-dns-event-route-agent.py`, `network-split-guard.sh`, `china-route.sh`, `network-split-domestic-health.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
 | Shared dependency | `network_split_policy.py` | Required by the event agent and both routing scripts; not a redundant daemon |
 | Maintenance | `build-domain-proxy.py`, `deploy-domain-proxy.py`, `deploy-security-update.zsh`, `install-network-split-dns-event-route-agent.sh` | Manual build, deployment and installation tools, not background jobs; installation can restart services |
-| Legacy implementation | `network-split-dns-route-agent.py`, `install-network-split-dns-route-agent.sh` | Not used by the current services; the source remains covered by offline tests; do not run the old installer on this Mac |
-| Legacy firewall tools | `install-network-split-dns-no-bypass.sh`, `remove-network-split-dns-firewall.sh` | Historical PF setup and rollback, not current maintenance entrypoints; neither should be run for normal troubleshooting |
 | Verification | The nine files in `tests/` | Retained tests, not launchd jobs; `domain_proxy_live_evidence.py` accesses the live network and requires administrator authorization |
 
 Source/deployed copies have different roles: the repository is the editable
 source; `/usr/local/sbin` is the launchd execution location. Compare their
 contents before deployment rather than treating either location as disposable.
 This inventory establishes roles and references, not playback stability.
-
-On 2026-09-25, 25 inactive `.bak` files were moved out of `/usr/local/sbin`
-and `/Library/LaunchDaemons` into the root-private archive
-`/var/backups/network-split/retired.pMQuNgn3`. Its `SHA256SUMS` records their
-original relative paths; all 25 archived files passed verification. Current
-programs and launchd configurations stayed in place.
 
 Review interface names, gateways, DNS addresses, ownership, and launchd state
 before restoring on another Mac or after a major network topology change.
@@ -199,11 +170,11 @@ receive an Ethernet override. Missing or malformed address policy fails closed.
 Keep both policy files and their parent directory root-owned and not writable by
 unprivileged accounts. Never automatically add exceptions from DNS answers.
 
-Install the policy module before replacing either DNS agent or shell guard.
+Install the policy module before replacing the DNS event agent or shell guards.
 Deploy `china-route.sh` and `network-split-guard.sh` together: their lock and
 force marker now live under root-only-writable `/var/db`, with no `/tmp` fallback.
-Let an existing route rebuild finish before replacement; restart only DNS route
-agents that are already enabled. Do not restart dnsmasq merely to update these
+Let an existing route rebuild finish before replacement; restart the DNS event
+agent only if it is already enabled. Do not restart dnsmasq merely to update these
 scripts. Preserve query logging with `nobody:wheel` ownership and mode `0660`.
 
 The old event agent did not track route ownership. Before declaring migration

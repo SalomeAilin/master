@@ -36,14 +36,28 @@ if check_domestic_domain missing.cn; then exit 1; else [[ $? = 2 ]]; fi
 [[ -s "$trace" ]]
 print 'PASS actual empty DNS response remains distinguishable'
 
-# Exercise only deployment selection, with launchd mocked and no installation.
-selection=$(sed -n '/^files=(/,/^for file in \$files; do/{ /^for file in \$files; do/!p; }' deploy-security-update.zsh)
-selection=${selection//\/bin\/launchctl/mock_launchctl}
-mock_launchctl() { return 1; }
+# Exercise deployment selection and restart handling without running installation.
+selection=$(sed -n '/^files=(/p' deploy-security-update.zsh)
 eval "$selection"
-[[ ${#files} = 4 && ${files[(Ie)network-split-dns-route-agent.py]} = 0 ]]
-print 'PASS inactive legacy DNS agent is not redeployed'
-mock_launchctl() { return 0; }
-eval "$selection"
-[[ ${#files} = 5 && ${files[(Ie)network-split-dns-route-agent.py]} != 0 ]]
-print 'PASS enabled legacy DNS agent still receives security updates'
+expected_files=(network_split_policy.py network-split-dns-event-route-agent.py china-route.sh network-split-guard.sh)
+[[ "${(j: :)files}" = "${(j: :)expected_files}" ]]
+for file in $files; do [[ -f "$file" ]]; done
+print 'PASS deployment selects only the four current source files'
+
+restart=$(sed -n '/^label=/,/^fi$/p' deploy-security-update.zsh)
+restart=${restart//\/bin\/launchctl/mock_launchctl}
+mock_launchctl() {
+  launch_calls+=("$*")
+  if [[ "$1" = print ]]; then return "$agent_status"; fi
+  return 0
+}
+launch_calls=()
+agent_status=1
+eval "$restart"
+[[ ${#launch_calls} = 1 && "$launch_calls[1]" = 'print system/com.local.network-split-dns-event-route-agent' ]]
+print 'PASS unloaded event agent is not started'
+launch_calls=()
+agent_status=0
+eval "$restart"
+[[ ${#launch_calls} = 2 && "$launch_calls[1]" = 'print system/com.local.network-split-dns-event-route-agent' && "$launch_calls[2]" = 'kickstart -k system/com.local.network-split-dns-event-route-agent' ]]
+print 'PASS only the loaded current event agent is restarted'
