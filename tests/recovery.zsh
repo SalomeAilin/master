@@ -133,3 +133,196 @@ recovery_logs=()
 eval "$recovery"
 [[ ${#launch_calls} = 1 && ${#recovery_logs} = 1 ]]
 print 'PASS health recovery uses one non-restarting launchd request, only for drift'
+
+# Exercise adaptive scheduling with a fake clock, never the live health service.
+(
+  for name in reset_probe_schedule load_probe_schedule write_state probe_due record_probe_sample; do
+    eval "$(sed -n "/^${name}() {/,/^}/p" network-split-domestic-health.sh)"
+  done
+  STATE_FILE="$test_dir/health.state"
+  schedule_logs=()
+  log() { schedule_logs+=("$*"); }
+  now=1000
+  reset_probe_schedule
+  probe_due
+  for attempt in {1..5}; do
+    now=$((now + 30))
+    record_probe_sample 1 100 ok
+    [[ $probe_interval = 30 ]]
+  done
+  now=$((now + 30))
+  record_probe_sample 1 100 ok
+  [[ $probe_interval = 60 && $baseline_ms = 100 && ${#probe_samples} = 0 ]]
+  now=$((now + 30))
+  if probe_due; then exit 1; fi
+  now=$((now + 30))
+  probe_due
+  for attempt in {1..6}; do
+    record_probe_sample 1 100 ok
+    now=$((now + 60))
+  done
+  [[ $probe_interval = 120 ]]
+  for attempt in {1..2}; do
+    record_probe_sample 1 500 ok
+    [[ $probe_interval = 120 ]]
+    now=$((now + 120))
+  done
+  record_probe_sample 1 500 ok
+  [[ $probe_interval = 30 && $cooldown_until = $((now + 600)) && $baseline_ms = 0 ]]
+  for attempt in {1..19}; do
+    now=$((now + 30))
+    record_probe_sample 1 100 ok
+    [[ $probe_interval = 30 ]]
+  done
+  now=$((now + 30))
+  record_probe_sample 1 100 ok
+  [[ $probe_interval = 60 ]]
+  record_probe_sample 0 -1 curl_28
+  [[ $probe_interval = 30 && ${#probe_samples} = 0 ]]
+  print 'PASS measured baseline, staged backoff, sustained regression and cooldown'
+
+  reset_probe_schedule
+  for attempt in {1..6}; do
+    now=$((now + 30))
+    record_probe_sample 1 100 ok
+  done
+  for duration in 500 100 100 100 100 100; do
+    now=$((now + 60))
+    record_probe_sample 1 "$duration" ok
+    [[ $probe_interval != 30 ]]
+  done
+  [[ $probe_interval = 120 ]]
+  for duration in 500 500 100 500 500 100; do
+    now=$((now + 120))
+    record_probe_sample 1 "$duration" ok
+  done
+  [[ $probe_interval = 30 ]]
+  reset_probe_schedule
+  for attempt in {1..6}; do
+    now=$((now + 30))
+    record_probe_sample 1 1000 ok
+  done
+  for attempt in {1..6}; do
+    now=$((now + 60))
+    record_probe_sample 1 1400 ok
+  done
+  [[ $probe_interval = 120 ]]
+  record_probe_sample 0 -1 http_503
+  print 'PASS one outlier is tolerated; bad window rolls back; both timing margins apply'
+
+  # Round-trip only a bounded, versioned data format; never source shell state.
+  write_state
+  saved_now=$now
+  reset_probe_schedule
+  load_probe_schedule
+  [[ $last_probe = $saved_now && $cooldown_until = $((now + 600)) ]]
+  [[ "$(stat -f %Lp "$STATE_FILE")" = 600 ]]
+  [[ ! -e "${STATE_FILE}.tmp.$$" ]]
+  valid_state="$(<"$STATE_FILE")"
+  now=$((saved_now - 1))
+  if load_probe_schedule; then exit 1; fi
+  now=$((saved_now + 601))
+  if load_probe_schedule; then exit 1; fi
+  now=$saved_now
+  for corrupt in 'failure_count=2' 'version=99' 'version=$(touch forbidden)' 'version=999999999999999999999'; do
+    print -r -- "$corrupt" > "$STATE_FILE"
+    if load_probe_schedule; then exit 1; fi
+  done
+  for corrupt in "${valid_state/probe_interval=30/probe_interval=999}" \
+      "${valid_state/failure_count=0/failure_count=1000001}" \
+      "${valid_state/slow_count=0/slow_count=3}" \
+      "${valid_state/baseline_ms=0/baseline_ms=10001}" \
+      "${valid_state/probe_samples=/probe_samples=100,,200}" \
+      "${valid_state/probe_samples=/probe_samples=100,}" \
+      "${valid_state/probe_samples=/probe_samples=10001}" \
+      "${valid_state/probe_samples=/probe_samples=1,2,3,4,5,6,7}" \
+      "${valid_state}"$'\nversion=1'; do
+    print -r -- "$corrupt" > "$STATE_FILE"
+    if load_probe_schedule; then exit 1; fi
+  done
+  print -r -- "$valid_state" > "$STATE_FILE"
+  load_probe_schedule
+  previous_writer=$functions[write_state]
+  functions[write_state]=${previous_writer//\/bin\/mv/fail_rename}
+  fail_rename() { return 1; }
+  if write_state; then exit 1; fi
+  [[ "$(<"$STATE_FILE")" = "$valid_state" && ! -e "${STATE_FILE}.tmp.$$" ]]
+  functions[write_state]=$previous_writer
+  print 'PASS private atomic state, old/corrupt state and clock/sleep reset'
+)
+
+# Run the whole existing health program with only its external effects mocked.
+(
+  health_state="$test_dir/integration.state"
+  health_lock="$test_dir/integration.lock"
+  health_log="$test_dir/integration.log"
+  requests="$test_dir/requests"
+  recovery_requests="$test_dir/recovery-requests"
+  body="$(sed -e 's|^STATE_FILE=.*|STATE_FILE="$health_state"|' \
+    -e 's|^LOCK_FILE=.*|LOCK_FILE="$health_lock"|' \
+    -e 's|^LOG_FILE=.*|LOG_FILE="$health_log"|' \
+    -e 's|^now=\$EPOCHSECONDS$|now=$fake_now|' \
+    -e 's|/usr/bin/curl|mock_curl|g' \
+    -e 's|/sbin/route|mock_route|g' \
+    -e 's|/bin/launchctl|mock_launchctl|g' network-split-domestic-health.sh)"
+  mock_curl() {
+    print called >> "$requests"
+    print "$response|223.5.5.5|192.0.2.1"
+    return "$curl_status"
+  }
+  mock_route() { print "gateway: $route_gateway\ninterface: en0"; }
+  mock_launchctl() { print "$*" >> "$recovery_requests"; }
+  run_health() ( set +e; eval "$body" )
+  response='200|0.100000'
+  route_gateway=192.168.1.1
+  curl_status=0
+  for fake_now in {1000..4600..30}; do run_health; done
+  # 121 scheduled invocations: six at 30s, six at 60s, then 25 at 120s.
+  [[ $(wc -l < "$requests") -eq 37 ]]
+  [[ ! -e "$recovery_requests" ]]
+  [[ "$(<"$health_state")" = *'probe_interval=120'* ]]
+  print 'PASS replay: 37 HTTP probes versus 121 fixed-cadence probes, no route repair'
+
+  # A failed trial immediately restores the original cadence, without repair.
+  fake_now=4720
+  response='000|10.000000'
+  curl_status=28
+  run_health
+  [[ "$(<"$health_state")" = *'probe_interval=30'* ]]
+  [[ ! -e "$recovery_requests" ]]
+  # HTTP challenges must not qualify as a healthy performance baseline.
+  response='403|0.010000'
+  curl_status=0
+  for fake_now in {4750..5500..30}; do run_health; done
+  [[ "$(<"$health_state")" = *'probe_interval=30'* ]]
+  [[ ! -e "$recovery_requests" ]]
+  # Known route drift still requests exactly the original, non-restarting guard.
+  fake_now=5530
+  response='200|0.100000'
+  route_gateway=192.0.2.254
+  run_health
+  [[ "$(<"$recovery_requests")" = 'kickstart system/com.local.network-split-guard' ]]
+  [[ "$(<"$health_state")" = *'probe_interval=30'* ]]
+  print 'PASS timeout/challenge rollback and route-drift-only recovery integration'
+
+  fake_now=5560
+  route_gateway=192.168.1.1
+  response='200|not-a-duration'
+  run_health
+  [[ "$(<"$health_state")" = *'probe_interval=30'* ]]
+  [[ "$(<"$health_log")" = *'reason=invalid_timing'* ]]
+  [[ $(wc -l < "$recovery_requests") -eq 1 ]]
+  # A stale/corrupt schedule must run a fresh probe rather than suppress checks.
+  before=$(wc -l < "$requests")
+  print 'version=invalid' > "$health_state"
+  fake_now=5570
+  response='200|0.100000'
+  run_health
+  [[ $(wc -l < "$requests") -eq $((before + 1)) ]]
+  [[ "$(<"$health_state")" = *'probe_interval=30'* ]]
+  fake_now=6200
+  run_health
+  [[ "$(<"$health_state")" = *'probe_samples=100'* ]]
+  [[ ! -e "${health_state}.tmp.$$" ]]
+  print 'PASS malformed timing, persisted-state reset and task-file cleanup'
+)

@@ -254,6 +254,55 @@ medians were 242 ms and 1.3 ms. The real policy matched the preceding algorithm
 on 526 deterministic cases; regression tests also cover interval boundaries,
 gaps, special addresses, policy replacement, and malformed-policy rejection.
 
+### Adaptive HTTP Probe Cadence
+
+The domestic health check can now tune its own **active HTTP probe interval**;
+this is background-load control, not automatic DNS selection, bandwidth tuning,
+or a claim that playback stutter has been fixed. Its existing launchd job still
+wakes every 30 seconds. Runs between due probes take the existing lock, validate
+the existing state file, and exit without HTTP requests or route checks. The
+separate route guard keeps its 30-second schedule and the DNS event observer
+remains active. Proxy configuration, interface policy, DNS and engine source
+are unchanged; there is no new daemon, script, timer, or persistent file.
+
+- Start at 30 seconds. Six healthy 2xx/3xx samples establish a median latency
+  baseline and start a 60-second trial; six acceptable trial samples allow
+  120 seconds. The existing endpoint, wired-route check and four-second health
+  limit are retained. A 401/403 response is not a performance baseline.
+- Keep comparing new samples with that baseline. A regression must exceed both
+  50% and 250 ms: three consecutive regressions, or a six-sample median above
+  that threshold, restores 30 seconds. A failed probe, route drift, unacceptable
+  status or the existing absolute timeout/slow limit also restores 30 seconds.
+  A ten-minute healthy cooldown is required before another slower-cadence trial.
+- Trial, six-sample verification and rollback events use the existing rotated
+  health log. State reuses the existing private, atomically replaced health
+  state file and stores at most six timing samples. Legacy, malformed, oversized
+  or duplicate-key state, a backward clock jump, or a probe gap over ten minutes
+  resets the schedule to 30 seconds. State is parsed as data, never executed.
+- Only confirmed route drift can request the existing non-restarting route
+  guard. Timing changes and HTTP errors cannot restart services, rewrite routes,
+  switch interfaces, extend DNS TTLs, or weaken foreign fail-closed behavior.
+
+Tradeoff: at the 120-second stage this HTTP monitor may take about two minutes
+plus probe execution time to observe a new failure; latency regression detection
+needs multiple samples. This is not real-time application monitoring, and a
+single endpoint cannot establish the health of all domestic or foreign sites.
+Reduced probe count is measurable; latency comparisons here are safeguards,
+not evidence that reducing probes caused a website speed improvement.
+
+`zsh tests/recovery.zsh` exercises the actual program with mocked external
+commands and a simulated clock. A healthy one-hour replay makes 37 HTTP probes
+across 121 scheduled invocations instead of 121, including the initial baseline
+and trials. The steady 120-second stage targets 75% fewer probes than 30 seconds;
+these are replay/count results, not measured live traffic or playback gains.
+
+Deployment is separate from source acceptance: after administrator approval,
+replace only the mapped `network-split-domestic-health.sh` atomically while
+holding its existing health lock. Validate syntax and retain the prior deployed
+file until the first scheduled run and state/log checks pass. Do not restart
+the proxy, DNS, route guard or event observer. Rollback restores that one file;
+the preceding version can still read `failure_count` from the extended state.
+
 Review interface names, gateways, DNS addresses, ownership, and launchd state
 before restoring on another Mac or after a major network topology change.
 `network-split-status.html` is intentionally excluded because it can contain
