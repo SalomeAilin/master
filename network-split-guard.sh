@@ -22,6 +22,7 @@ EXTRA_ROUTE_LIST="/usr/local/etc/domestic_extra_routes.txt"
 DOMESTIC_DOMAIN_LIST="/usr/local/etc/domestic_domains.conf"
 FORCE_REBUILD_FILE="/var/db/china-route-force-rebuild"
 LOG_FILE="/var/log/network-split-guard.log"
+LOCK_FILE="/var/db/network-split-guard.flock"
 MAX_WAIT_SECONDS=60
 SLEEP_SECONDS=3
 KICKSTART_TIMEOUT_SECONDS=8
@@ -692,6 +693,12 @@ log_default_route() {
     log "default route drift gateway=$gateway interface=$iface expected_default=${WIFI_GW}/${WIFI_IF}"
   fi
 }
+
+# Serialize scheduled, recovery and manual runs before any network mutation.
+umask 077
+zmodload zsh/system || exit 1
+: >> "$LOCK_FILE" || exit 1
+zsystem flock -t 0 -f lock_fd "$LOCK_FILE" || exit 0
 
 ensure_dns "$WIFI_SERVICE"
 ensure_dns "$ETH_SERVICE"

@@ -6,7 +6,7 @@ set -u
 PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 ETH_GW="192.168.1.1"
 ETH_IF="en0"
-ROOT_GUARD="/usr/local/sbin/network-split-guard.sh"
+GUARD_SERVICE="system/com.local.network-split-guard"
 PROBE_DOMAIN="live.douyin.com"
 PROBE_URL="https://live.douyin.com/"
 MAX_SECONDS="4.0"
@@ -86,7 +86,10 @@ failure_count=$((failure_count + 1))
 log "unhealthy domain=$PROBE_DOMAIN ip=${ip:-none} local_ip=${local_ip:-none} curl_exit=$curl_exit reason=$reason http=${http_code:-000} time=${http_seconds:-none}s failures=$failure_count"
 
 if [ "$reason" = "route_drift" ]; then
-  "$ROOT_GUARD" >/dev/null 2>&1 || true
+  # No -k: an in-progress repair must finish without being restarted.
+  if ! /bin/launchctl kickstart "$GUARD_SERVICE" >/dev/null 2>&1; then
+    log "route recovery request failed service=$GUARD_SERVICE; no direct retry"
+  fi
 fi
 
 write_state

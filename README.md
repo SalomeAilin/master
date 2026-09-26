@@ -179,6 +179,14 @@ source; `/usr/local/sbin` is the launchd execution location. Compare their
 contents before deployment rather than treating either location as disposable.
 This inventory establishes roles and references, not playback stability.
 
+Route-guard runs share the root-owned `/var/db/network-split-guard.flock` kernel
+lock before any network changes. Overlapping invocations exit without repair;
+the kernel releases the lock when its owner exits, including after a crash.
+The domestic health check requests the existing launchd guard with `kickstart`
+without `-k`, so it does not start a separate shell guard or terminate an active
+repair. HTTP errors and slow responses alone do not request route repair.
+This serializes guard instances, not every component that manages routes.
+
 Review interface names, gateways, DNS addresses, ownership, and launchd state
 before restoring on another Mac or after a major network topology change.
 `network-split-status.html` is intentionally excluded because it can contain
