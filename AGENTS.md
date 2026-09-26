@@ -24,4 +24,5 @@
 - 2026-09-25：用户说的"复刻"指 GitHub Fork。sing-box 的 fork 在 `SalomeAilin/sing-box`。
 - 2026-09-26：`sing-box/` 已改为 squashed Git subtree，不再是单独的仓库。正在运行的代理引擎由其中的 v1.14.2 源码编译，详见 `README.md`。
 - 2026-09-26：在 Claude 桌面 App 里运行第三方 Python（PATH 里排第一的 `/usr/local/bin/python3`）访问局域网地址（路由器、组播地址），会报 `[Errno 65] No route to host`。这是 macOS 的"本地网络"隐私权限在拦截，不是路由故障，不能据此判断路由器不通。同一个脚本改用 Apple 自带的 `/usr/bin/python3` 就能正常发送，`curl`、`nc`、`ping` 也不受影响。Codex 里是否一样还没验证过。
+- 2026-09-26：这台 Mac 的 zsh 5.9 里，`set -e` 在函数内部触发退出时，顶层的 `trap ... EXIT` 不会执行，只有在顶层失败时才会执行。靠 EXIT 陷阱清理临时文件的脚本，要再加一个 `trap ... ZERR`。在 `if` 条件里失败不会触发 ZERR，`$(...)` 里的也一样。清理函数里用 `(( ZSH_SUBSHELL == 0 ))` 判断，只在主 shell 执行清理，参见 `deploy-remote-access.zsh`。
 - sing-box 的许可证是 GPL-3.0-or-later，另附条款：衍生作品未经许可不得使用 sing-box 的名称。

@@ -1,130 +1,210 @@
 #!/bin/zsh
-# Install, inspect or remove remote-access reply routing and the SSH hardening
-# drop-in. Remote Login, the router port forward and client keys stay manual.
+# Install, inspect or remove the SSH hardening drop-in used for remote access.
+# Remote Login, the router port forward and client keys stay manual.
 set -euo pipefail
-[[ $EUID -eq 0 ]] || { print -u2 'Administrator authorization required'; exit 1; }
 
-action=${1:-install}
 source_dir=${0:A:h}
-label=com.local.network-remote-access
-anchor=com.apple/400.RemoteAccess
-loader=/usr/local/sbin/network-remote-access-pf.sh
-rules=/usr/local/etc/network-remote-access.pf.conf
-plist=/Library/LaunchDaemons/$label.plist
-sshd_dropin=/etc/ssh/sshd_config.d/050-remote-access.conf
-state_dir=/var/db/network-remote-access
-log_file=/var/log/network-remote-access.log
-remote_user=${REMOTE_USER:-${SUDO_USER:-}}
+# Tests point REMOTE_ACCESS_SSH_DIR at a scratch copy of /etc/ssh.
+ssh_dir=${REMOTE_ACCESS_SSH_DIR:-/etc/ssh}
+sshd_main=$ssh_dir/sshd_config
+sshd_dropin=$ssh_dir/sshd_config.d/050-remote-access.conf
+template=$source_dir/sshd-remote-access.conf
+marker='# Installed as /etc/ssh/sshd_config.d/050-remote-access.conf by deploy-remote-access.zsh.'
+required=(passwordauthentication:no kbdinteractiveauthentication:no
+  authenticationmethods:publickey permitrootlogin:no)
+remote_user=''
 stage=''
-trap 'if [[ -n $stage ]]; then /bin/rm -rf "$stage"; fi' EXIT
 
-# A throwaway host key lets sshd check the configuration even before Remote
+cleanup() {
+  # Command substitutions are subshells; only the main shell owns the stage.
+  (( ZSH_SUBSHELL == 0 )) || return 0
+  if [[ -n $stage ]]; then /bin/rm -rf "$stage"; stage=''; fi
+}
+# zsh skips the EXIT trap when errexit fires inside a function; ZERR covers that.
+trap cleanup EXIT
+trap cleanup ZERR
+
+usage() {
+  print -u2 "Usage: sudo zsh ${0:t} install|status|uninstall"
+  exit 2
+}
+
+# A throwaway host key lets sshd evaluate the configuration even before Remote
 # Login has generated the system host keys.
 sshd_check() {
   local keydir result
-  keydir=$(/usr/bin/mktemp -d /var/db/network-remote-access-sshd.XXXXXXXX)
+  keydir=$(/usr/bin/mktemp -d -t remote-access-sshd)
   /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$keydir/key" >/dev/null
   if /usr/sbin/sshd "$@" -h "$keydir/key"; then result=0; else result=$?; fi
   /bin/rm -rf "$keydir"
   return $result
 }
 
-show_status() {
-  print "pf: $(/sbin/pfctl -s info 2>/dev/null | /usr/bin/awk '/^Status:/ {print $2; exit}')"
-  print "anchor $anchor:"
-  /sbin/pfctl -a "$anchor" -s rules 2>/dev/null | /usr/bin/sed 's/^/  /' || true
-  print "blocked sources: $(/sbin/pfctl -a "$anchor" -t remote_access_abusers -T show 2>/dev/null | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
-  if /bin/launchctl print "system/$label" >/dev/null 2>&1; then
-    print "launchd: $label loaded"
-  else
-    print "launchd: $label not loaded"
-  fi
-  print "sshd settings for an outside connection as ${remote_user:-nobody}:"
-  sshd_check -T -C "user=${remote_user:-nobody},host=remote.invalid,addr=203.0.113.1" 2>/dev/null |
-    /usr/bin/grep -iE '^(passwordauthentication|kbdinteractiveauthentication|authenticationmethods|permitrootlogin|allowusers) ' |
-    /usr/bin/sed 's/^/  /' || true
-  print "recent log:"
-  /usr/bin/tail -n 5 "$log_file" 2>/dev/null | /usr/bin/sed 's/^/  /' || true
+# Settings sshd would apply to a connection from outside, in lower case.
+effective_settings() {
+  local out
+  out=$(sshd_check -T -f "$1" -C "user=$2,host=remote.invalid,addr=203.0.113.1") || return 1
+  print -r -- "${(L)out}"
 }
 
-install_all() {
-  local file previous='' attempt
-  if [[ -z "$remote_user" || "$remote_user" = root || ! "$remote_user" =~ '^[A-Za-z0-9._-]+$' ]]; then
+settings_ok() {
+  local effective=$'\n'$1$'\n' item
+  for item in $required "allowusers:${(L)2}"; do
+    [[ $effective == *$'\n'"${item%%:*} ${item#*:}"$'\n'* ]] || return 1
+  done
+}
+
+dropin_user() {
+  /usr/bin/awk '$1 == "AllowUsers" {print $2; exit}' "$sshd_dropin"
+}
+
+# Evaluate the real main configuration and the other drop-ins with the
+# candidate in place, inside the stage, before anything goes live.
+validate_candidate() {
+  local check=$stage/check file
+  /bin/mkdir -p "$check/sshd_config.d"
+  for file in "$ssh_dir"/sshd_config.d/*(N); do
+    [[ $file = "$sshd_dropin" ]] || /bin/cp -p "$file" "$check/sshd_config.d/"
+  done
+  /bin/cp "$1" "$check/sshd_config.d/${sshd_dropin:t}"
+  /usr/bin/sed "s|^Include $ssh_dir/sshd_config.d/\*\$|Include $check/sshd_config.d/*|" "$sshd_main" > "$check/sshd_config"
+  if ! /usr/bin/grep -Fqx "Include $check/sshd_config.d/*" "$check/sshd_config"; then
+    print -u2 "$sshd_main no longer includes $ssh_dir/sshd_config.d/*"
+    return 1
+  fi
+  sshd_check -t -f "$check/sshd_config" || return 1
+  if ! settings_ok "$(effective_settings "$check/sshd_config" "$remote_user")" "$remote_user"; then
+    print -u2 'Another sshd setting overrides the drop-in'
+    return 1
+  fi
+}
+
+# sshd's StrictModes ignores keys when these are writable by group or others.
+strict_ok() {
+  local mode owner
+  read -r mode owner <<< "$(/usr/bin/stat -f '%Lp %Su' "$1")"
+  [[ $owner = "$2" || $owner = root ]] && (( (8#$mode & 8#022) == 0 ))
+}
+
+show_status() {
+  local user=$remote_user effective home keys path pubkeys
+  if [[ ! -f $sshd_dropin ]]; then
+    print 'drop-in: not installed'
+  elif [[ $(/usr/bin/head -n 1 "$sshd_dropin") = "$marker" ]]; then
+    [[ -n $user ]] || user=$(dropin_user)
+    print "drop-in: $sshd_dropin (AllowUsers $(dropin_user))"
+  else
+    print "drop-in: $sshd_dropin exists but was not installed by ${0:t}"
+  fi
+  [[ -n $user ]] || user=${REMOTE_USER:-${SUDO_USER:-}}
+  if /bin/launchctl print system/com.openssh.sshd >/dev/null 2>&1; then
+    print 'remote login: on'
+  else
+    print 'remote login: off'
+  fi
+  pubkeys=("$ssh_dir"/ssh_host_*_key.pub(N))
+  if (( ${#pubkeys} )); then
+    for path in $pubkeys; do print "host key: $(/usr/bin/ssh-keygen -lf "$path")"; done
+  else
+    print 'host keys: not generated yet (Remote Login creates them on first start)'
+  fi
+  [[ -n $user ]] || return 0
+  if effective=$(effective_settings "$sshd_main" "$user"); then
+    if settings_ok "$effective" "$user"; then
+      print "sshd: key-only login for $user"
+    else
+      print 'sshd: WARNING the effective settings are weaker than the drop-in'
+    fi
+    print -r -- "$effective" |
+      /usr/bin/grep -E '^(passwordauthentication|kbdinteractiveauthentication|authenticationmethods|permitrootlogin|allowusers) ' |
+      /usr/bin/sed 's/^/  /' || true
+  else
+    print 'sshd: WARNING sshd -T failed; the configuration does not load'
+  fi
+  home=$(/usr/bin/dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}') || home=''
+  keys=$home/.ssh/authorized_keys
+  if [[ ! -f $keys ]]; then
+    print "authorized keys: none yet ($keys is missing)"
+  elif strict_ok "$home" "$user" && strict_ok "$home/.ssh" "$user" && strict_ok "$keys" "$user"; then
+    print "authorized keys: $(/usr/bin/grep -cvE '^[[:space:]]*(#|$)' "$keys" || true) in $keys"
+  else
+    print "authorized keys: WARNING $keys or a parent is writable by others; sshd will ignore it"
+  fi
+  if /usr/sbin/dseditgroup -o checkmember -m "$user" com.apple.access_ssh >/dev/null 2>&1; then
+    print "Remote Login access list: $user allowed"
+  else
+    print "Remote Login access list: check that $user is allowed in System Settings"
+  fi
+}
+
+install_dropin() {
+  local previous='' existing=''
+  remote_user=${REMOTE_USER:-${SUDO_USER:-}}
+  if [[ -z $remote_user || $remote_user = root || ! $remote_user =~ '^[A-Za-z0-9._-]+$' ]]; then
     print -u2 'Run with sudo from the account that will log in remotely, or set REMOTE_USER'
     exit 1
   fi
   /usr/bin/id "$remote_user" >/dev/null
-  for file in network-remote-access-pf.sh network-remote-access.pf.conf "$label.plist" sshd-remote-access.conf; do
-    [[ -f "$source_dir/$file" ]] || { print -u2 "Missing $source_dir/$file; nothing installed"; exit 1; }
-  done
-  /bin/zsh -n "$source_dir/network-remote-access-pf.sh"
-  if ! /sbin/pfctl -n -a "$anchor" -f "$source_dir/network-remote-access.pf.conf" 2>/dev/null; then
-    print -u2 'pf rejected network-remote-access.pf.conf; nothing installed'
-    exit 1
+  [[ -f $template ]] || { print -u2 "Missing $template; nothing installed"; exit 1; }
+  # A reinstall from another admin account must not silently hand SSH access over.
+  if [[ -f $sshd_dropin ]]; then
+    existing=$(dropin_user)
+    if [[ -n $existing && $existing != "$remote_user" && -z ${REMOTE_USER:-} ]]; then
+      print -u2 "$sshd_dropin allows $existing; rerun with REMOTE_USER=$remote_user to change that"
+      exit 1
+    fi
   fi
-  /usr/bin/plutil -lint -s "$source_dir/$label.plist"
+  print "Remote login account: $remote_user"
 
   umask 022
-  # Stage on the same volume so each replacement below is an atomic rename.
-  stage=$(/usr/bin/mktemp -d /usr/local/.network-remote-access-stage.XXXXXXXX)
-  /usr/bin/sed "s/__REMOTE_USER__/$remote_user/" "$source_dir/sshd-remote-access.conf" > "$stage/sshd.src"
-  /usr/bin/install -o root -g wheel -m 644 "$stage/sshd.src" "$stage/sshd"
-  /usr/bin/install -o root -g wheel -m 644 "$source_dir/network-remote-access.pf.conf" "$stage/rules"
-  /usr/bin/install -o root -g wheel -m 755 "$source_dir/network-remote-access-pf.sh" "$stage/loader"
-  /usr/bin/install -o root -g wheel -m 644 "$source_dir/$label.plist" "$stage/plist"
-
-  # SSH hardening goes first and must pass sshd's own check before anything
-  # that makes the port reachable from outside is activated.
-  if [[ -e "$sshd_dropin" ]]; then
-    previous="$stage/sshd.previous"
+  # Stage beside the drop-in directory, not inside it, so a concurrent sshd
+  # never includes a half-written file; the final mv is an atomic rename.
+  stage=$(/usr/bin/mktemp -d "$ssh_dir/.remote-access-stage.XXXXXXXX")
+  /usr/bin/sed "s/__REMOTE_USER__/$remote_user/" "$template" > "$stage/dropin"
+  /bin/chmod 644 "$stage/dropin"
+  if (( EUID == 0 )); then /usr/sbin/chown root:wheel "$stage/dropin"; fi
+  if ! validate_candidate "$stage/dropin"; then
+    print -u2 'Nothing installed'
+    exit 1
+  fi
+  if [[ -e $sshd_dropin ]]; then
+    previous=$stage/previous
     /bin/cp -p "$sshd_dropin" "$previous"
   fi
-  /bin/mv -f "$stage/sshd" "$sshd_dropin"
-  if ! sshd_check -t; then
-    if [[ -n "$previous" ]]; then /bin/mv -f "$previous" "$sshd_dropin"; else /bin/rm -f "$sshd_dropin"; fi
-    print -u2 'sshd rejected the drop-in; previous SSH configuration restored, nothing else installed'
+  /bin/mv -f "$stage/dropin" "$sshd_dropin"
+  # Check the live configuration too, in case it changed after validation.
+  if ! settings_ok "$(effective_settings "$sshd_main" "$remote_user")" "$remote_user"; then
+    if [[ -n $previous ]]; then /bin/mv -f "$previous" "$sshd_dropin"; else /bin/rm -f "$sshd_dropin"; fi
+    print -u2 'Live sshd check failed; the previous SSH configuration is back in place'
     exit 1
   fi
-
-  /bin/mkdir -p /usr/local/etc /usr/local/sbin
-  /bin/mv -f "$stage/rules" "$rules"
-  /bin/mv -f "$stage/loader" "$loader"
-  /bin/mv -f "$stage/plist" "$plist"
-  if /bin/launchctl print "system/$label" >/dev/null 2>&1; then
-    /bin/launchctl kickstart -k "system/$label"
-  else
-    /bin/launchctl bootstrap system "$plist"
-  fi
-  for attempt in {1..10}; do
-    /sbin/pfctl -a "$anchor" -s rules 2>/dev/null | /usr/bin/grep -q 'reply-to' && break
-    /bin/sleep 1
-  done
   show_status
-  if ! /sbin/pfctl -a "$anchor" -s rules 2>/dev/null | /usr/bin/grep -q 'reply-to'; then
-    print -u2 "Remote-access anchor did not load; see $log_file"
+}
+
+uninstall_dropin() {
+  if [[ ! -e $sshd_dropin ]]; then
+    print "Nothing to remove: $sshd_dropin is not installed"
+    return 0
+  fi
+  if [[ $(/usr/bin/head -n 1 "$sshd_dropin") != "$marker" ]]; then
+    print -u2 "$sshd_dropin was not installed by ${0:t}; left in place"
     exit 1
   fi
+  /bin/rm -f "$sshd_dropin"
+  sshd_check -t -f "$sshd_main"
+  print "Removed $sshd_dropin."
+  print 'If Remote Login stays on, sshd accepts password logins again; turn it and the'
+  print 'router port forward off if remote access is no longer needed.'
 }
 
-uninstall_all() {
-  if /bin/launchctl print "system/$label" >/dev/null 2>&1; then
-    /bin/launchctl bootout "system/$label" || true
-  fi
-  /sbin/pfctl -a "$anchor" -F all >/dev/null 2>&1 || true
-  # Release only the pf reference the loader took; other pf users keep theirs.
-  if [[ -r "$state_dir/pf-token" ]]; then
-    /sbin/pfctl -X "$(<"$state_dir/pf-token")" >/dev/null 2>&1 || true
-  fi
-  /bin/rm -f "$plist" "$loader" "$rules" "$sshd_dropin"
-  /bin/rm -rf "$state_dir"
-  print 'Removed the remote-access anchor, loader, launchd job and SSH drop-in.'
-  print 'Remote Login and the router port forward are unchanged. If Remote Login stays on,'
-  print "sshd now accepts password logins again; turn it and the port forward off if unused."
-}
-
-case $action in
-  install) install_all ;;
+(( $# == 1 )) || usage
+if [[ $ssh_dir = /etc/ssh && $EUID -ne 0 ]]; then
+  print -u2 'Administrator authorization required'
+  exit 1
+fi
+case $1 in
+  install) install_dropin ;;
   status) show_status ;;
-  uninstall) uninstall_all ;;
-  *) print -u2 "Usage: sudo zsh ${0:t} [install|status|uninstall]"; exit 2 ;;
+  uninstall) uninstall_dropin ;;
+  *) usage ;;
 esac

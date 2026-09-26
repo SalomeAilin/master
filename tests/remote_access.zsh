@@ -5,116 +5,85 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail() { print -u2 "FAIL $*"; exit 1; }
 
-for script in network-remote-access-pf.sh deploy-remote-access.zsh; do /bin/zsh -n "$script"; done
-plutil -lint -s com.local.network-remote-access.plist
-print 'PASS scripts and launchd plist parse'
-
-# Parsing with -n needs no administrator rights and loads nothing.
-normalized=$(/sbin/pfctl -nv -a com.apple/400.RemoteAccess -f network-remote-access.pf.conf 2>/dev/null)
-eval "$(sed -n -E '/^(ETH_IF|ETH_GW|ETH_IP)=/p' network-split-guard.sh)"
-block="block drop in quick on $ETH_IF inet proto tcp from <remote_access_abusers> to $ETH_IP port = 22"
-pass="pass in quick on $ETH_IF reply-to ($ETH_IF $ETH_GW) inet proto tcp from ! ${ETH_IP%.*}.0/24 to $ETH_IP port = 22 flags S/SA keep state"
-[[ $normalized == *"$block"*"$pass"* ]] || fail 'rules must block overloaded sources before the reply-to pass'
-[[ $normalized == *"overload <remote_access_abusers> flush global"* ]]
-print 'PASS pf rules parse and follow the guard wired interface'
-
-eval "$(sed -n -E '/^(label|anchor|loader|rules|sshd_dropin)=/p' deploy-remote-access.zsh)"
-eval "$(sed -n -E '/^(ANCHOR|RULES_FILE|ABUSER_TABLE)=/p' network-remote-access-pf.sh)"
-[[ $(/usr/libexec/PlistBuddy -c 'Print :Label' com.local.network-remote-access.plist) = $label ]]
-[[ $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' com.local.network-remote-access.plist) = $loader ]]
-[[ $ANCHOR = $anchor && $RULES_FILE = $rules && $normalized == *"<$ABUSER_TABLE>"* ]]
-print 'PASS launchd job, deploy script and loader agree on paths and anchor'
-
+/bin/zsh -n deploy-remote-access.zsh
+eval "$(sed -n -E '/^(ssh_dir|sshd_dropin|marker)=/p' deploy-remote-access.zsh)"
+[[ $(head -n 1 sshd-remote-access.conf) = "$marker" ]] || fail 'template must start with the marker uninstall checks'
 # sshd keeps the first value it reads, so the drop-in must sort before Apple's.
-[[ ${sshd_dropin:t} < 100-macos.conf ]]
-mkdir "$tmp/sshd_config.d"
-sed "s/__REMOTE_USER__/$USER/" sshd-remote-access.conf > "$tmp/sshd_config.d/${sshd_dropin:t}"
-cp /etc/ssh/sshd_config.d/100-macos.conf "$tmp/sshd_config.d/"
-sed "s|/etc/ssh/sshd_config.d/\*|$tmp/sshd_config.d/*|" /etc/ssh/sshd_config > "$tmp/sshd_config"
+[[ ${sshd_dropin:h} = /etc/ssh/sshd_config.d && ${sshd_dropin:t} < 100-macos.conf ]]
+grep -qx 'Include /etc/ssh/sshd_config.d/\*' /etc/ssh/sshd_config
+print 'PASS drop-in carries the marker, is included and precedes 100-macos.conf'
+
+# Without pf, SSH replies rely on the Wi-Fi-loss reject routes being gateway
+# routes: XNU scoped lookups skip lo0 routes only when they carry RTF_GATEWAY.
+eval "$(sed -n -E '/^FOREIGN_BLOCK_GW=/p' network-split-guard.sh)"
+block_routes=$(sed -n '/^ensure_foreign_block_routes() {/,/^}/p' network-split-guard.sh)
+[[ $FOREIGN_BLOCK_GW = 127.0.0.1 ]]
+[[ $block_routes == *'route -n add -net 0.0.0.0/1 "$FOREIGN_BLOCK_GW" -reject'* ]]
+[[ $block_routes == *'route -n add -net 128.0.0.0/1 "$FOREIGN_BLOCK_GW" -reject'* ]]
+[[ $block_routes != *-interface* && $block_routes != *-iface* ]]
+print 'PASS Wi-Fi-loss reject routes stay gateway routes that scoped SSH replies bypass'
+
+if env -u REMOTE_ACCESS_SSH_DIR zsh deploy-remote-access.zsh status >/dev/null 2>&1; then
+  fail 'the real /etc/ssh must require administrator rights'
+fi
+print 'PASS the real /etc/ssh requires administrator rights'
+
+# A scratch copy of /etc/ssh: the real main file with its Include redirected,
+# plus the real drop-ins other than ours.
+tree=$tmp/etc-ssh
+mkdir -p "$tree/sshd_config.d"
+for file in /etc/ssh/sshd_config.d/*(N); do
+  [[ ${file:t} = ${sshd_dropin:t} ]] || cp "$file" "$tree/sshd_config.d/"
+done
+sed "s|^Include /etc/ssh/sshd_config.d/\*\$|Include $tree/sshd_config.d/*|" /etc/ssh/sshd_config > "$tree/sshd_config"
+grep -Fqx "Include $tree/sshd_config.d/*" "$tree/sshd_config" || fail 'could not redirect the Include line'
+dropin=$tree/sshd_config.d/${sshd_dropin:t}
+run() { env -u SUDO_USER -u REMOTE_USER REMOTE_ACCESS_SSH_DIR="$tree" "$@"; }
 ssh-keygen -q -t ed25519 -N '' -f "$tmp/hostkey"
 # Newer sshd prints keywords in mixed case, so compare in lower case.
-effective=$'\n'${(L)"$(/usr/sbin/sshd -T -f "$tmp/sshd_config" -h "$tmp/hostkey" \
-  -C "user=$USER,host=remote.invalid,addr=203.0.113.1")"}$'\n'
+effective() {
+  print -r -- $'\n'${(L)"$(/usr/sbin/sshd -T -f "$tree/sshd_config" -h "$tmp/hostkey" \
+    -C "user=$1,host=remote.invalid,addr=203.0.113.1")"}$'\n'
+}
+
+if run zsh deploy-remote-access.zsh >/dev/null 2>&1; then fail 'no action must not install'; else code=$?; fi
+[[ $code = 2 && ! -e $dropin ]]
+print 'PASS running without an action prints usage and changes nothing'
+
+out=$(run REMOTE_USER="$USER" zsh deploy-remote-access.zsh install 2>&1) || fail "install: $out"
+[[ $(head -n 1 "$dropin") = "$marker" ]] && grep -qx "AllowUsers $USER" "$dropin"
+[[ -z $(print -l "$tree"/.remote-access-stage.*(N)) ]] || fail 'stage directory left behind'
+eff=$(effective "$USER")
 for setting in 'passwordauthentication no' 'kbdinteractiveauthentication no' \
   'authenticationmethods publickey' 'permitrootlogin no' "allowusers ${(L)USER}"; do
-  [[ $effective == *$'\n'"$setting"$'\n'* ]] || fail "sshd effective setting missing: $setting"
+  [[ $eff == *$'\n'"$setting"$'\n'* ]] || fail "effective setting missing after install: $setting"
 done
-print 'PASS sshd accepts the drop-in and allows key-only login for one account'
+[[ $out == *"sshd: key-only login for $USER"* ]] || fail "install status: $out"
+run REMOTE_USER="$USER" zsh deploy-remote-access.zsh install >/dev/null 2>&1 || fail 'reinstall for the same account'
+print 'PASS install activates key-only login for one account and cleans its stage'
 
-for fn in log pf_enabled ensure_pf_enabled main_ruleset_hooks_anchor ensure_main_ruleset \
-  rules_hash anchor_loaded ensure_anchor_rules expire_abusers main; do
-  eval "$(sed -n "/^$fn() {/,/^}/p" network-remote-access-pf.sh)"
-done
-PFCTL=$tmp/pfctl
-STOCK_PF_CONF=/etc/pf.conf
-RULES_FILE=$tmp/rules.conf
-ABUSER_EXPIRE_SECONDS=3600
-STATE_DIR=$tmp/state
-TOKEN_FILE=$STATE_DIR/pf-token
-LOADED_HASH_FILE=$STATE_DIR/rules.sha256
-LOG_FILE=$tmp/loader.log
-pf=$tmp/pf
-mkdir "$pf"
-cp network-remote-access.pf.conf "$RULES_FILE"
-# The stub keeps simulated pf state in files; reloading pf.conf empties the anchor.
-cat > "$PFCTL" <<'EOF'
-#!/bin/zsh
-pf=${0:h}/pf
-print -r -- "$*" >> "$pf/calls"
-case "$*" in
-  '-s info') [[ -e $pf/enabled ]] && print 'Status: Enabled for 0 days 00:00:01' || print 'Status: Disabled' ;;
-  '-E') touch "$pf/enabled"; print 'pf enabled'; print 'Token : 4242' ;;
-  '-s rules') [[ -e $pf/hooked ]] && print 'anchor "com.apple/*" all' ;;
-  '-f /etc/pf.conf') touch "$pf/hooked"; rm -f "$pf/anchor" ;;
-  '-a com.apple/400.RemoteAccess -s rules') [[ -e $pf/anchor ]] && cat "$pf/anchor" ;;
-  '-a com.apple/400.RemoteAccess -f '*) [[ -e $pf/fail_load ]] && { print -u2 'syntax error'; exit 1; }; cp "${@[-1]}" "$pf/anchor" ;;
-  '-a com.apple/400.RemoteAccess -t remote_access_abusers -T expire 3600') ;;
-  *) print -u2 "unexpected pfctl $*"; exit 3 ;;
-esac
-exit 0
-EOF
-chmod +x "$PFCTL"
-loads() { grep -cE -- '(^| )-f ' "$pf/calls" || true; }
+before=$(shasum "$dropin")
+if run SUDO_USER=daemon zsh deploy-remote-access.zsh install >/dev/null 2>&1; then
+  fail 'a reinstall from another sudo account changed AllowUsers'
+fi
+[[ $(shasum "$dropin") = "$before" ]]
+print 'PASS a reinstall from another account cannot silently change AllowUsers'
 
-main || fail 'cold start'
-[[ $(grep -cx -- '-E' "$pf/calls") = 1 && $(<"$TOKEN_FILE") = 4242 ]]
-grep -qx -- '-f /etc/pf.conf' "$pf/calls"
-cmp -s "$pf/anchor" "$RULES_FILE"
-[[ $(<"$LOADED_HASH_FILE") = $(shasum -a 256 "$RULES_FILE" | awk '{print $1}') ]]
-grep -qx -- '-a com.apple/400.RemoteAccess -t remote_access_abusers -T expire 3600' "$pf/calls"
-grep -q 'enabled pf token=4242' "$LOG_FILE"
-grep -q 'restored main ruleset' "$LOG_FILE"
-grep -q 'loaded anchor=com.apple/400.RemoteAccess' "$LOG_FILE"
-print 'PASS cold start enables pf once, restores the hook and loads the anchor'
+print 'AuthenticationMethods any' > "$tree/sshd_config.d/010-weaker.conf"
+if run REMOTE_USER="$USER" zsh deploy-remote-access.zsh install >/dev/null 2>&1; then
+  fail 'install accepted an earlier drop-in that overrides it'
+fi
+[[ $(shasum "$dropin") = "$before" ]]
+out=$(run REMOTE_USER="$USER" zsh deploy-remote-access.zsh status 2>&1)
+[[ $out == *'WARNING the effective settings are weaker'* ]] || fail "status must flag the override: $out"
+rm "$tree/sshd_config.d/010-weaker.conf"
+print 'PASS an earlier drop-in that weakens login blocks install and shows in status'
 
-: > "$pf/calls"; : > "$LOG_FILE"
-main || fail 'steady state'
-[[ $(loads) = 0 && ! -s $LOG_FILE ]] || fail 'steady state must not reload or log'
-if grep -qx -- '-E' "$pf/calls"; then fail 'steady state took another pf reference'; fi
-print 'PASS steady state changes nothing and logs nothing'
-
-rm "$pf/anchor"
-main || fail 'emptied anchor'
-cmp -s "$pf/anchor" "$RULES_FILE"
-rm "$pf/hooked"; : > "$pf/calls"
-main || fail 'lost hook'
-grep -qx -- '-f /etc/pf.conf' "$pf/calls"
-cmp -s "$pf/anchor" "$RULES_FILE"
-print 'PASS an emptied anchor or a lost com.apple hook is repaired'
-
-print '# edited' >> "$RULES_FILE"
-main || fail 'changed rules'
-cmp -s "$pf/anchor" "$RULES_FILE"
-touch "$pf/fail_load"
-print '# broken edit' >> "$RULES_FILE"
-if main; then fail 'a rejected rules file must fail'; fi
-grep -q 'failed to load anchor=com.apple/400.RemoteAccess: .*syntax error' "$LOG_FILE"
-rm "$pf/fail_load"
-print 'PASS changed rules are reloaded and a rejected load is reported'
-
-rm -rf "$pf"/* "$STATE_DIR"
-touch "$pf/enabled" "$pf/hooked"
-main || fail 'pf enabled elsewhere'
-[[ ! -e $TOKEN_FILE ]]
-if grep -qx -- '-E' "$pf/calls"; then fail 'took a pf reference while pf was enabled'; fi
-print 'PASS no pf reference is taken while pf is already enabled'
+cp "$dropin" "$tmp/ours"
+print '# not ours' > "$dropin"
+if run zsh deploy-remote-access.zsh uninstall >/dev/null 2>&1; then fail 'uninstall removed a foreign file'; fi
+[[ -f $dropin ]]
+cp "$tmp/ours" "$dropin"
+run zsh deploy-remote-access.zsh uninstall >/dev/null 2>&1 || fail 'uninstall'
+[[ ! -e $dropin ]]
+print 'PASS uninstall removes only its own drop-in'
