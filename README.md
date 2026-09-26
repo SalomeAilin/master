@@ -38,10 +38,14 @@ Since 2026-09-26, the running engine is built from the stable `v1.14.2` tag in
 The build uses Go 1.26.8, darwin/arm64, CGO, the full
 `release/DEFAULT_BUILD_TAGS`, and `release/LDFLAGS`. Installed binary SHA-256:
 `09e56e101f5340b4c43e331a07a4f99d434cc785b68c0ca68939efe0cf0f025c`.
-The source checkout is independent of this configuration repository. Only the
-proxy engine was replaced; routing, DNS, service configuration and cache were
-preserved. A root-private copy of the preceding official binary is retained
-locally for engine rollback.
+The stable source is tracked under [sing-box/](sing-box/) as a squashed Git
+subtree, not a separate nested repository. Its original license, source tree
+and optional client references are preserved; the root `.gitmodules` maps those
+clients to their prefixed paths. The engine build does not require initializing
+the optional client submodules. Compiled binaries and local caches are ignored.
+Only the proxy engine was replaced; routing, DNS, service configuration and
+cache were preserved. The inactive official binary backup was removed at the
+owner's request after verifying the running source-built binary.
 
 After replacement, held TLS connections and unique kernel sockets confirmed
 Douyin and CSDN over Ethernet and GitHub over Wi-Fi, each returning HTTP 200.
