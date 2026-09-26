@@ -7,8 +7,9 @@
 1. 同一时间只让一方修改这个目录，另一方只查看、不改动。不确定对方是否正在改时，先问用户。
 2. 动手前先运行 `git status`。如果有不是自己留下的未提交改动，先停下来问用户，不要覆盖、还原或代为提交。
 3. 每完成一件事就提交，提交信息写清楚改了什么、为什么。不要留下改到一半的文件。
-4. `sing-box/` 是引擎源码（squashed Git subtree），修改前先和用户确认。
-5. 部署到系统位置（如 `/usr/local`、`/Library/LaunchDaemons`）需要管理员权限，按 `README.md` 的步骤进行，并由用户确认后执行。
+4. 提交后直接推送到 GitHub（`origin main`），不用再问用户。仓库是公开的，推送前确认改动里没有密钥、个人信息或本机网络细节。推送被拒绝时先运行 `git pull --rebase origin main`；有冲突就停下来问用户，不要强制推送。
+5. `sing-box/` 是引擎源码（squashed Git subtree），修改前先和用户确认。
+6. 部署到系统位置（如 `/usr/local`、`/Library/LaunchDaemons`）需要管理员权限，按 `README.md` 的步骤进行，并由用户确认后执行。
 
 ## 共同记忆的写法
 
