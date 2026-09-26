@@ -126,6 +126,7 @@ the dnsmasq query log: the live DNS event agent consumes it for route decisions.
 | `network-domain-proxy/service.log` | Domain routing and proxy connection errors | Existing proxy supervisor: 2 MiB threshold, three archives |
 | Guard and health `.out` / `.err` | Short-lived job output and startup failures | `newsyslog`: 256 KiB threshold, three archives each |
 | DNS event agent `.out` / `.err` | Long-lived process startup/output channels | Presently empty; not covered by the main-log rotation guarantee |
+| `network-remote-access.log` | pf enable and remote-access anchor changes | Written only when something changes; not rotated. Its `.out` / `.err` are expected to stay empty |
 
 Additional tests: `python3 -B tests/domain_proxy.py`,
 `python3 -B tests/domain_proxy_deploy.py`,
@@ -143,6 +144,45 @@ engine tests, not proof of production video playback quality.
 - If Wi-Fi is unavailable, foreign traffic is blocked instead of falling back
   to Ethernet. More-specific domestic routes remain available over Ethernet.
 - System DNS uses the local split resolver at `192.168.1.100`.
+- Exception (owner-approved 2026-09-26): replies to SSH connections that arrive
+  on Ethernet from outside the LAN always return through `en0`, even while
+  Wi-Fi is unavailable. See Remote Access Reply Routing.
+
+## Remote Access Reply Routing
+
+While Wi-Fi is unavailable the guard adds `0.0.0.0/1` and `128.0.0.0/1` reject
+routes through `lo0`. macOS keeps loopback routes even for lookups scoped to the
+wired interface, so a reply from `192.168.1.100` to a foreign client, such as a
+phone roaming abroad, would be rejected and inbound SSH could not connect.
+
+`network-remote-access.pf.conf` passes inbound TCP to `192.168.1.100:22` on `en0`
+from outside `192.168.1.0/24` with `reply-to (en0 192.168.1.1)`, so the replies of
+those connections leave through the wired gateway whatever the routing table
+says. Other foreign traffic still stops when Wi-Fi is unavailable. A source that
+opens more than ten connections per minute, or holds ten at once, is blocked for
+an hour.
+
+`network-remote-access-pf.sh` runs from `com.local.network-remote-access` at load
+and every 60 seconds. It loads the rules into anchor `com.apple/400.RemoteAccess`,
+which the stock `/etc/pf.conf` evaluates through `anchor "com.apple/*"`. It takes
+a pf enable reference only while pf is disabled, restores the stock main ruleset
+if the `com.apple` hook is missing, reloads the anchor when it is emptied or the
+rules file changes, and logs only changes to the world-readable
+`/var/log/network-remote-access.log`.
+
+`sshd-remote-access.conf` becomes `/etc/ssh/sshd_config.d/050-remote-access.conf`:
+key-only login for the installing account and no root login. It sorts before
+Apple's `100-macos.conf` because sshd keeps the first value it reads, and it has
+no effect until Remote Login is on.
+
+Install, inspect or remove with administrator rights from the account that will
+log in remotely: `sudo zsh deploy-remote-access.zsh install|status|uninstall`.
+Installation checks the pf rules and the sshd configuration before activating
+anything; the sshd check uses a throwaway host key because the system keys appear
+only after Remote Login first runs. Uninstall releases only the pf reference the
+loader took. Remote Login, the router port forward, DDNS and client keys stay
+manual. The external port is router configuration and is not recorded here.
+Offline checks: `zsh tests/remote_access.zsh`.
 
 ## Active File Mapping
 
@@ -161,6 +201,10 @@ engine tests, not proof of production video playback quality.
 - `com.local.network-split-dns-event-route-agent.plist` -> `/Library/LaunchDaemons/`
 - `com.local.network-domain-proxy.plist` -> `/Library/LaunchDaemons/`
 - `homebrew.mxcl.dnsmasq.plist` -> `/Library/LaunchDaemons/`
+- `network-remote-access-pf.sh` -> `/usr/local/sbin/`
+- `network-remote-access.pf.conf` -> `/usr/local/etc/`
+- `sshd-remote-access.conf` -> `/etc/ssh/sshd_config.d/050-remote-access.conf` (account name filled in at install)
+- `com.local.network-remote-access.plist` -> `/Library/LaunchDaemons/`
 
 Deploy only the files listed in the active mapping. Retired implementations
 remain available in Git history, not in the current deployment or test suite.
@@ -169,10 +213,10 @@ remain available in Git history, not in the current deployment or test suite.
 
 | Role | Files | Use on this Mac |
 | --- | --- | --- |
-| Runtime | `network-domain-proxy-run.py`, `network-split-dns-event-route-agent.py`, `network-split-guard.sh`, `china-route.sh`, `network-split-domestic-health.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
+| Runtime | `network-domain-proxy-run.py`, `network-split-dns-event-route-agent.py`, `network-split-guard.sh`, `china-route.sh`, `network-split-domestic-health.sh`, `network-remote-access-pf.sh` | Managed by the seven active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
 | Shared dependency | `network_split_policy.py` | Required by the event agent and both routing scripts; not a redundant daemon |
-| Maintenance | `build-domain-proxy.py`, `deploy-domain-proxy.py`, `deploy-security-update.zsh`, `install-network-split-dns-event-route-agent.sh` | Manual build, deployment and installation tools, not background jobs; installation can restart services |
-| Verification | The nine files in `tests/` | Retained tests, not launchd jobs; `domain_proxy_live_evidence.py` accesses the live network and requires administrator authorization |
+| Maintenance | `build-domain-proxy.py`, `deploy-domain-proxy.py`, `deploy-security-update.zsh`, `deploy-remote-access.zsh`, `install-network-split-dns-event-route-agent.sh` | Manual build, deployment and installation tools, not background jobs; installation can restart services |
+| Verification | The ten files in `tests/` | Retained tests, not launchd jobs; `domain_proxy_live_evidence.py` accesses the live network and requires administrator authorization |
 
 Source/deployed copies have different roles: the repository is the editable
 source; `/usr/local/sbin` is the launchd execution location. Compare their
@@ -237,5 +281,6 @@ the old agent log; remove only confirmed obsolete agent-created routes. Do not
 flush all host routes or infer ownership from the interface alone.
 
 Offline checks: `python3 -B tests/security_policy.py`,
-`zsh tests/security_shell.zsh`, `zsh tests/recovery.zsh`, and
-`zsh tests/route-snapshot.zsh`. Tests do not mutate system routes.
+`zsh tests/security_shell.zsh`, `zsh tests/recovery.zsh`,
+`zsh tests/route-snapshot.zsh`, and `zsh tests/remote_access.zsh`. Tests do not
+mutate system routes or load pf rules.
