@@ -292,7 +292,8 @@ check_extra_routes() {
 }
 
 check_domestic_domain() {
-  domain="$1"
+  local domain="$1" ips_text ip
+  local -a ips
   ips_text="$(ipv4s_for_domain "$domain")"
 
   if [ -z "$ips_text" ]; then
@@ -300,10 +301,12 @@ check_domestic_domain() {
     return 2
   fi
 
+  # Load policy once for the DNS answer batch, not once for each address.
+  ips_text="$(/usr/bin/printf '%s\n' "$ips_text" | /usr/local/bin/python3 -B /usr/local/sbin/network_split_policy.py)" || return 0
+  # Policy rejection is not a DNS failure and must not trigger route repair.
+  [ -n "$ips_text" ] || return 0
   ips=("${(@f)ips_text}")
   for ip in $ips; do
-    # Policy rejection is not a DNS failure and must not trigger route repair.
-    /usr/local/bin/python3 /usr/local/sbin/network_split_policy.py "$ip" || continue
     if ! check_route "$ip" "$ETH_GW" "$ETH_IF"; then
       log "domestic domain route drift domain=$domain ip=$ip"
       add_domestic_host_route "$domain" "$ip" || return 1

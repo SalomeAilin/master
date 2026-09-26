@@ -187,6 +187,23 @@ without `-k`, so it does not start a separate shell guard or terminate an active
 repair. HTTP errors and slow responses alone do not request route repair.
 This serializes guard instances, not every component that manages routes.
 
+Address authorization uses a sorted index of merged IPv4 intervals instead of
+scanning every prefix for each answer. It preserves gaps and special-address
+rejection, checks policy-file identity and modification metadata on every call,
+and fails closed on a missing or malformed policy. The guard filters each
+domain's DNS answers in one helper process; route mutations still independently
+recheck policy. No extra daemon, persistent index file, DNS TTL extension, or
+proxy change is involved. Reduced local policy overhead is not a claim of faster
+Internet transit or smoother video playback.
+
+On 2026-09-26, a local comparison against the preceding implementation measured
+the same eight-address check at a median 295 ms across eight helper processes
+versus 48 ms through the new batch path (three samples, about 84% less time).
+For 320 repeated checks including policy-file metadata validation, five-sample
+medians were 242 ms and 1.3 ms. The real policy matched the preceding algorithm
+on 526 deterministic cases; regression tests also cover interval boundaries,
+gaps, special addresses, policy replacement, and malformed-policy rejection.
+
 Review interface names, gateways, DNS addresses, ownership, and launchd state
 before restoring on another Mac or after a major network topology change.
 `network-split-status.html` is intentionally excluded because it can contain

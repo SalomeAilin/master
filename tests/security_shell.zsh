@@ -4,12 +4,18 @@ cd "${0:A:h}/.."
 
 # Exercise the real policy with repository address lists, never the live router.
 policy_check() {
-  python3 -B -c 'import sys; import network_split_policy as p; p.POLICY_FILES=("china_ip_list.txt", "domestic_extra_routes.txt"); sys.exit(0 if p.allowed(sys.argv[1]) else 1)' "$1"
+  python3 -B -c 'import sys; import network_split_policy as p; p.POLICY_FILES=("china_ip_list.txt", "domestic_extra_routes.txt")
+if len(sys.argv) == 2:
+    sys.exit(0 if p.allowed(sys.argv[1]) else 1)
+for line in sys.stdin:
+    value = line.strip()
+    if p.allowed(value):
+        print(value)' "$@"
 }
 eval "$(sed -n '/^add_domestic_host_route() {/,/^}/p' network-split-guard.sh | sed 's|/usr/local/bin/python3 /usr/local/sbin/network_split_policy.py|policy_check|g; s|/sbin/route|forbidden_route|g')"
 forbidden_route() { print 'FAIL route reached' >&2; return 99; }
 # Return value alone is insufficient: record any route call in a temporary file.
-trace=$(mktemp)
+trace=$(mktemp "${TMPDIR:-/tmp}/network-policy-test.XXXXXXXX")
 trap 'rm -f "$trace"' EXIT
 forbidden_route() { print called >> "$trace"; return 99; }
 for ip in 8.8.8.8 127.0.0.1 999.1.1.1; do
@@ -23,7 +29,7 @@ for script in china-route.sh; do
   body=$(sed -n '/^ipv4s_for_domain() {/,/^}/p' "$script")
   [[ "$body" = *'/usr/local/sbin/network_split_policy.py'* ]]
 done
-eval "$(sed -n '/^check_domestic_domain() {/,/^}/p' network-split-guard.sh | sed 's|/usr/local/bin/python3 /usr/local/sbin/network_split_policy.py|policy_check|g')"
+eval "$(sed -n '/^check_domestic_domain() {/,/^}/p' network-split-guard.sh | sed 's|/usr/local/bin/python3 -B /usr/local/sbin/network_split_policy.py|policy_check|g')"
 ipv4s_for_domain() { print 8.8.8.8; }
 log() { print logged >> "$trace"; }
 check_route() { print route_checked >> "$trace"; return 1; }
@@ -35,6 +41,26 @@ DNS_SERVER=192.168.1.100
 if check_domestic_domain missing.cn; then exit 1; else [[ $? = 2 ]]; fi
 [[ -s "$trace" ]]
 print 'PASS actual empty DNS response remains distinguishable'
+
+# One helper must filter the complete answer batch without losing valid answers.
+policy_calls="${trace}.policy"
+trap 'rm -f "$trace" "$policy_calls"' EXIT
+functions[real_policy_check]=$functions[policy_check]
+policy_check() { print called >> "$policy_calls"; real_policy_check "$@"; }
+ipv4s_for_domain() { print '8.8.8.8\n223.5.5.5\n127.0.0.1\n119.29.29.29'; }
+ETH_GW=192.168.1.1
+ETH_IF=en0
+checked=()
+check_route() { checked+=("$1"); return 0; }
+check_domestic_domain mixed.cn
+[[ $(wc -l < "$policy_calls") -eq 1 ]]
+[[ "${(j: :)checked}" = '223.5.5.5 119.29.29.29' ]]
+print 'PASS one batch invocation preserves allowed answers and rejects others'
+policy_check() { return 1; }
+checked=()
+check_domestic_domain unavailable.cn
+[[ ${#checked} = 0 ]]
+print 'PASS failed policy helper cannot trigger route lookups or repairs'
 
 # Exercise deployment selection and restart handling without running installation.
 selection=$(sed -n '/^files=(/p' deploy-security-update.zsh)
