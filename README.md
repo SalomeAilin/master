@@ -32,8 +32,24 @@ Sources: [sing-geosite](https://github.com/SagerNet/sing-geosite),
 [sing-geoip](https://github.com/SagerNet/sing-geoip), and
 [native rule-set updates](https://sing-box.sagernet.org/configuration/rule-set/).
 
-This uses the official sing-box 1.14.2 darwin-arm64 release, archive SHA-256
-`925c5382eca8492b0150f868a6db20b18290a38700e621724b3703fd453e032d`.
+Since 2026-09-26, the running engine is built from the stable `v1.14.2` tag in
+[SalomeAilin/sing-box](https://github.com/SalomeAilin/sing-box), commit
+`af6e64c3b69e6132ebaee0e1a3d24e93903f6709`, with no engine source changes.
+The build uses Go 1.26.8, darwin/arm64, CGO, the full
+`release/DEFAULT_BUILD_TAGS`, and `release/LDFLAGS`. Installed binary SHA-256:
+`09e56e101f5340b4c43e331a07a4f99d434cc785b68c0ca68939efe0cf0f025c`.
+The source checkout is independent of this configuration repository. Only the
+proxy engine was replaced; routing, DNS, service configuration and cache were
+preserved. A root-private copy of the preceding official binary is retained
+locally for engine rollback.
+
+After replacement, held TLS connections and unique kernel sockets confirmed
+Douyin and CSDN over Ethernet and GitHub over Wi-Fi, each returning HTTP 200.
+The source build also passed isolated automatic-classification, rule-update,
+cached-restart and fail-closed checks. These checks do not establish long-term
+stability or video playback quality; source compilation alone is not a latency
+optimization.
+
 There is no TLS interception, remote proxy server, TUN, or route-table mutation.
 The service runs as `nobody` and keeps up to four 2 MiB private log files under
 `/var/log/network-domain-proxy`. Existing DNS and IP guards remain for clients
@@ -48,10 +64,12 @@ Files:
 - `domestic_proxy_hosts.conf` adds exact observed Douyin resource hosts without
   classifying every shared ByteDance/TikTok suffix as domestic. These entries
   affect proxy connections only, not global routes or dnsmasq configuration.
-- `/usr/local/libexec/network-domain-sing-box` is the pinned external binary.
+- `/usr/local/libexec/network-domain-sing-box` is the pinned source-built binary.
 - `network-domain-proxy-run.py` is installed under `/usr/local/sbin/`.
 - `com.local.network-domain-proxy.plist` is a system LaunchDaemon.
 - `deploy-domain-proxy.py` separates service installation from proxy activation.
+  Its fresh `install` action still expects the original release-package layout
+  and refuses to replace an installed service; it is not an engine upgrade tool.
   Its `update-auto` action first prewarms all rule sets in an isolated candidate
   using the same unprivileged account, then installs validated staged `.srs`
   seeds and `config.json`, retains a root-private configuration backup, and restores the
@@ -67,6 +85,7 @@ Rollback: run `sudo /usr/local/bin/python3 -B
 /usr/local/sbin/network-domain-proxy-deploy.py rollback` as one command. This
 restores the previous Wi-Fi/Ethernet HTTP/HTTPS settings from
 `/var/db/network-domain-proxy.previous.json` before any service shutdown.
+This command does not restore the preceding engine binary.
 Do not stop the proxy while browser settings still point at it.
 
 Verified on 2026-09-11: Chrome opened loopback proxy connections; actual Douyin

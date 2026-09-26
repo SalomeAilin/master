@@ -3,6 +3,7 @@ import importlib.util
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -96,13 +97,21 @@ def run(binary):
                         wait_for(lambda: "started" in log_path.read_text() or process.poll() is not None)
                         assert process.poll() is None, log_path.read_text()
 
+                        def request_lines(start, local_port):
+                            lines = log_path.read_text()[start:].splitlines()
+                            incoming = next((line for line in lines if
+                                             f"inbound connection from 127.0.0.1:{local_port}" in line), "")
+                            match = re.search(r"\[(\d+) ", incoming)
+                            return [line for line in lines if match and f"[{match[1]} " in line]
+
                         def check(name, outbound):
                             start = len(log_path.read_text())
                             with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
+                                local_port = connection.getsockname()[1]
                                 connection.sendall(f"CONNECT {name}:443 HTTP/1.1\r\nHost: {name}:443\r\n\r\n".encode())
                                 connection.recv(4096)
                                 expected = f"outbound/direct[{outbound}]: outbound connection to {name}:443"
-                                wait_for(lambda: expected in log_path.read_text()[start:])
+                                wait_for(lambda: any(expected in line for line in request_lines(start, local_port)))
                             print("PASS", name, "->", outbound)
 
                         check("github.com", "foreign-wifi")
@@ -113,10 +122,12 @@ def run(binary):
                         check("unknown-foreign.test", "foreign-wifi")
                         start = len(log_path.read_text())
                         with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
+                            local_port = connection.getsockname()[1]
                             connection.sendall(b"CONNECT private-rebind.test:443 HTTP/1.1\r\nHost: private-rebind.test:443\r\n\r\n")
                             connection.recv(4096)
-                            wait_for(lambda: "reject" in log_path.read_text()[start:])
-                        assert "outbound/direct" not in log_path.read_text()[start:]
+                            wait_for(lambda: any("reject" in line for line in request_lines(start, local_port)))
+                        # Earlier requests can still emit asynchronous connection errors.
+                        assert not any("outbound/direct" in line for line in request_lines(start, local_port))
                         print("PASS unclassified private DNS answer is rejected")
                         if not cached:
                             check("updated-cn.test", "foreign-wifi")
