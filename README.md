@@ -187,6 +187,12 @@ without `-k`, so it does not start a separate shell guard or terminate an active
 repair. HTTP errors and slow responses alone do not request route repair.
 This serializes guard instances, not every component that manages routes.
 
+The end-of-scan recovery check reconciles foreign fallback blocks even when
+macOS has already restored a Wi-Fi default route. A correct default alone does
+not prove the more-specific reject routes are gone. This handles Wi-Fi recovery
+during a domestic scan without waiting for another scheduled guard run; it does
+not replace the existing 30-second schedule with event-driven recovery.
+
 Address authorization uses a sorted index of merged IPv4 intervals instead of
 scanning every prefix for each answer. It preserves gaps and special-address
 rejection, checks policy-file identity and modification metadata on every call,

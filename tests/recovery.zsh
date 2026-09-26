@@ -51,6 +51,30 @@ for scenario in down block_failure recover repair_failure; do
 done
 print 'PASS switching order and fail-closed error branches'
 
+# Wi-Fi can recover during the domestic scan, with reject routes still present.
+(
+  eval "$(sed -n '/^protect_foreign_priority() {/,/^}/p' network-split-guard.sh)"
+  read_default_route() { print '172.20.10.1 en1'; }
+  foreign_default_route_active() { return 0; }
+  default_route_matches() { return 0; }
+  remove_foreign_block_routes() {
+    trace+=unblock,
+    [[ "$scenario" != cleanup_failure ]]
+  }
+  wifi_route_label() { print '172.20.10.1/en1'; }
+  log() { :; }
+  for scenario in recovered_during_scan cleanup_failure down; do
+    trace=''
+    if protect_foreign_priority; then result=0; else result=$?; fi
+    case $scenario in
+      recovered_during_scan) [[ "$trace" = unblock, && "$result" = 0 ]] ;;
+      cleanup_failure) [[ "$trace" = unblock, && "$result" = 1 ]] ;;
+      down) [[ -z "$trace" && "$result" = 0 ]] ;;
+    esac
+  done
+)
+print 'PASS end-of-scan recovery reconciles reject routes even with a Wi-Fi default'
+
 # Exercise the actual guard entry lock without reaching network mutations.
 test_dir=$(mktemp -d "${TMPDIR:-/tmp}/network-recovery-test.XXXXXXXX")
 lock_path="$test_dir/guard.flock"

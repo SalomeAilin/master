@@ -234,14 +234,6 @@ wifi_route_label() {
   /bin/echo "${gateway:-$WIFI_GW}/${WIFI_IF}"
 }
 
-foreign_default_route_active() {
-  route_info="$(read_default_route)"
-  gateway="$(/bin/echo "$route_info" | /usr/bin/awk '{print $1}')"
-  iface="$(/bin/echo "$route_info" | /usr/bin/awk '{print $2}')"
-
-  [ "$iface" = "$WIFI_IF" ] && route_gateway_on_wifi "$gateway"
-}
-
 add_domestic_host_route() {
   local domain="$1" ip="$2"
   local before add_error
@@ -348,15 +340,12 @@ protect_foreign_priority() {
     return 0
   fi
 
-  if foreign_default_route_active; then
-    return 0
-  fi
-
+  # A restored default can coexist with stale reject routes after reconnection.
   if ensure_foreign_default_route quiet >/dev/null 2>&1; then
     return 0
   fi
 
-  log "foreign priority protection failed; default route is not $(wifi_route_label)"
+  log "foreign priority protection failed; expected default=$(wifi_route_label) with fallback blocks removed"
   return 1
 }
 
