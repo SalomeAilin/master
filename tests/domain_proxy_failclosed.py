@@ -9,14 +9,14 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("builder", ROOT / "build-domain-proxy.py")
+spec = importlib.util.spec_from_file_location("builder", ROOT / "scripts" / "build-domain-proxy.py")
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
 
 def run(binary, rules_directory=builder.RULES_DIRECTORY):
     with tempfile.TemporaryDirectory() as directory:
-        config = builder.build(ROOT, rules_directory, Path(directory) / "cache.db")
+        config = builder.build(ROOT / "config", rules_directory, Path(directory) / "cache.db")
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]

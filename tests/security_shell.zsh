@@ -4,7 +4,7 @@ cd "${0:A:h}/.."
 
 # Exercise the real policy with repository address lists, never the live router.
 policy_check() {
-  python3 -B -c 'import sys; import network_split_policy as p; p.POLICY_FILES=("china_ip_list.txt", "domestic_extra_routes.txt")
+  python3 -B -c 'import sys; sys.path.insert(0, "scripts"); import network_split_policy as p; p.POLICY_FILES=("config/china_ip_list.txt", "config/domestic_extra_routes.txt")
 if len(sys.argv) == 2:
     sys.exit(0 if p.allowed(sys.argv[1]) else 1)
 for line in sys.stdin:
@@ -12,7 +12,7 @@ for line in sys.stdin:
     if p.allowed(value):
         print(value)' "$@"
 }
-eval "$(sed -n '/^add_domestic_host_route() {/,/^}/p' network-split-guard.sh | sed 's|/usr/local/bin/python3 /usr/local/sbin/network_split_policy.py|policy_check|g; s|/sbin/route|forbidden_route|g')"
+eval "$(sed -n '/^add_domestic_host_route() {/,/^}/p' scripts/network-split-guard.sh | sed 's|/usr/local/bin/python3 /usr/local/sbin/network_split_policy.py|policy_check|g; s|/sbin/route|forbidden_route|g')"
 forbidden_route() { print 'FAIL route reached' >&2; return 99; }
 # Return value alone is insufficient: record any route call in a temporary file.
 trace=$(mktemp "${TMPDIR:-/tmp}/network-policy-test.XXXXXXXX")
@@ -24,12 +24,12 @@ done
 [[ ! -s "$trace" ]]
 print 'PASS shell sink rejects foreign and malformed answers before route access'
 
-for script in china-route.sh; do
+for script in scripts/china-route.sh; do
   # Check the actual DNS pipeline routes its output through the shared policy.
   body=$(sed -n '/^ipv4s_for_domain() {/,/^}/p' "$script")
   [[ "$body" = *'/usr/local/sbin/network_split_policy.py'* ]]
 done
-eval "$(sed -n '/^check_domestic_domain() {/,/^}/p' network-split-guard.sh | sed 's|/usr/local/bin/python3 -B /usr/local/sbin/network_split_policy.py|policy_check|g')"
+eval "$(sed -n '/^check_domestic_domain() {/,/^}/p' scripts/network-split-guard.sh | sed 's|/usr/local/bin/python3 -B /usr/local/sbin/network_split_policy.py|policy_check|g')"
 ipv4s_for_domain() { print 8.8.8.8; }
 log() { print logged >> "$trace"; }
 check_route() { print route_checked >> "$trace"; return 1; }
@@ -63,14 +63,14 @@ check_domestic_domain unavailable.cn
 print 'PASS failed policy helper cannot trigger route lookups or repairs'
 
 # Exercise deployment selection and restart handling without running installation.
-selection=$(sed -n '/^files=(/p' deploy-security-update.zsh)
+selection=$(sed -n '/^files=(/p' scripts/deploy-security-update.zsh)
 eval "$selection"
 expected_files=(network_split_policy.py network-split-dns-event-route-agent.py china-route.sh network-split-guard.sh)
 [[ "${(j: :)files}" = "${(j: :)expected_files}" ]]
-for file in $files; do [[ -f "$file" ]]; done
+for file in $files; do [[ -f "scripts/$file" ]]; done
 print 'PASS deployment selects only the four current source files'
 
-restart=$(sed -n '/^label=/,/^fi$/p' deploy-security-update.zsh)
+restart=$(sed -n '/^label=/,/^fi$/p' scripts/deploy-security-update.zsh)
 restart=${restart//\/bin\/launchctl/mock_launchctl}
 mock_launchctl() {
   launch_calls+=("$*")

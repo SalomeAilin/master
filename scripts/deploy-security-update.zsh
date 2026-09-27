@@ -10,7 +10,7 @@ done
 for file in china-route.sh network-split-guard.sh; do
   /bin/zsh -n "$source_dir/$file"
 done
-/usr/local/bin/python3 -B "$source_dir/tests/security_policy.py"
+/usr/local/bin/python3 -B "$source_dir/../tests/security_policy.py"
 # Do not replace a script while a route rebuild is in progress.
 for attempt in {1..60}; do
   if ! /usr/bin/pgrep -f '/usr/local/sbin/(china-route|network-split-guard)\.sh' >/dev/null; then

@@ -2,6 +2,37 @@
 
 This repository backs up the active split-routing configuration for this Mac.
 
+## Repository Layout
+
+| Directory | Contents |
+| --- | --- |
+| `scripts/` | Runtime scripts, shared policy module, and manual build/install tools |
+| `config/` | Domain/address policy and DNS/SSH configuration sources |
+| `config/launchd/` | LaunchDaemon property lists |
+| `config/chrome/` | Chrome preference snapshots |
+| `tests/` | Offline checks and the explicitly authorized live-evidence check |
+| `docs/` | Published, redacted verification records |
+| `assets/images/` | Project images with descriptive names |
+| `archive/` | Preserved historical material; not an active policy or deployment source |
+| `sing-box/` | Upstream engine source as a squashed Git subtree |
+| `local/` | Private working documents and preserved local caches; ignored by Git |
+
+Run repository commands from the repository root. For example:
+
+```sh
+python3 -B tests/security_policy.py
+zsh tests/security_shell.zsh
+```
+
+To generate proxy configuration, use
+`python3 -B scripts/build-domain-proxy.py /path/to/staging/config.json`, replacing
+`/path/to/staging` with an existing private staging directory. The builder reads
+policy from `config/`. System installation still requires administrator
+authorization; see the deployment sections below.
+
+The generated `network-split-status.html` stays at the repository root and is
+ignored by Git so its existing external updater can keep using the same path.
+
 ## Browser Domain Routing
 
 Chrome and applications honoring macOS HTTP/HTTPS proxy settings now use the
@@ -62,24 +93,31 @@ Existing system bypass entries, including `*.crashlytics.com`, were preserved.
 WebRTC, non-proxy clients and existing direct pooled connections are not covered.
 
 Files:
-- `build-domain-proxy.py` generates `/usr/local/etc/network-domain-proxy.json`
+- `scripts/build-domain-proxy.py` generates `/usr/local/etc/network-domain-proxy.json`
   from the checked-in domain and address policy. Regenerate, check with the
   installed sing-box binary, and redeploy after changing those lists.
-- `domestic_proxy_hosts.conf` adds exact observed Douyin resource hosts without
+- `config/domestic_proxy_hosts.conf` adds exact observed Douyin resource hosts without
   classifying every shared ByteDance/TikTok suffix as domestic. These entries
   affect proxy connections only, not global routes or dnsmasq configuration.
 - `/usr/local/libexec/network-domain-sing-box` is the pinned source-built binary.
-- `network-domain-proxy-run.py` is installed under `/usr/local/sbin/`.
-- `com.local.network-domain-proxy.plist` is a system LaunchDaemon.
-- `deploy-domain-proxy.py` separates service installation from proxy activation.
+- `scripts/network-domain-proxy-run.py` is installed under `/usr/local/sbin/`.
+- `config/launchd/com.local.network-domain-proxy.plist` is a system LaunchDaemon.
+- `scripts/deploy-domain-proxy.py` separates service installation from proxy activation.
   Its fresh `install` action still expects the original release-package layout
   and refuses to replace an installed service; it is not an engine upgrade tool.
   Its `update-auto` action first prewarms all rule sets in an isolated candidate
   using the same unprivileged account, then installs validated staged `.srs`
   seeds and `config.json`, retains a root-private configuration backup, and restores the
-  previous configuration if activation health probes fail. Stage the script,
-  configuration and the three rule files together outside protected Documents
-  before running as administrator. No additional updater daemon is needed.
+  previous configuration if activation health probes fail. Its deployment
+  inputs retain a flat staging layout outside protected Documents: copy
+  `scripts/deploy-domain-proxy.py`, `scripts/network-domain-proxy-run.py`, and
+  `config/launchd/com.local.network-domain-proxy.plist` there under their original
+  basenames, alongside `config.json` and the three `.srs` rule files. For a fresh
+  install, also include the release binary at
+  `sing-box-1.14.2-darwin-arm64/sing-box` inside that staging directory. Run the
+  staged `deploy-domain-proxy.py` as administrator with the intended action;
+  running the repository copy does not assemble those deployment inputs.
+  No additional updater daemon is needed.
   Cache prewarming avoids the observed first-background-download cancellation
   during initial network detection; cached startup does not immediately fetch.
   If both the runtime cache is lost and the initial background fetch fails,
@@ -163,7 +201,7 @@ the published source, not a live Wi-Fi-loss test, and the running kernel is newe
 A pf `reply-to` anchor was written for this on 2026-09-26 and removed the same day
 once the source showed it unnecessary; it remains in Git history.
 
-`sshd-remote-access.conf` becomes `/etc/ssh/sshd_config.d/050-remote-access.conf`:
+`config/sshd-remote-access.conf` becomes `/etc/ssh/sshd_config.d/050-remote-access.conf`:
 key-only login for one account and no root login. It sorts before Apple's
 `100-macos.conf` because sshd keeps the first value it reads, and it has no effect
 until Remote Login is on. `MaxAuthTries` keeps its default because a lower value
@@ -172,7 +210,7 @@ locks out clients whose agent offers several keys first; clients should set
 launchd starts `sshd -i` per connection, so `MaxStartups` and `PerSourcePenalties`
 do not apply, and key-only login leaves no password to guess.
 
-Run `sudo zsh deploy-remote-access.zsh install|status|uninstall` from the account
+Run `sudo zsh scripts/deploy-remote-access.zsh install|status|uninstall` from the account
 that will log in. Install evaluates the real main configuration and the other
 drop-ins with the candidate in a scratch copy, requires the effective settings for
 an outside connection to be key-only for that account, checks the live result
@@ -190,22 +228,22 @@ Offline checks: `zsh tests/remote_access.zsh`.
 
 ## Active File Mapping
 
-- `network-split-guard.sh` -> `/usr/local/sbin/network-split-guard.sh`
-- `china-route.sh` -> `/usr/local/sbin/china-route.sh`
-- `network-split-dns-event-route-agent.py` -> `/usr/local/sbin/`
-- `network_split_policy.py` -> `/usr/local/sbin/` (required by the DNS event agent and shell guards)
-- `network-split-domestic-health.sh` -> `/usr/local/sbin/`
-- `dnsmasq-network-split.conf` -> `/usr/local/etc/`
-- `china_ip_list.txt` -> `/usr/local/etc/`
-- `domestic_domains.conf` -> `/usr/local/etc/`
-- `domestic_extra_routes.txt` -> `/usr/local/etc/`
-- `com.local.china-route.plist` -> `/Library/LaunchDaemons/`
-- `com.local.network-split-guard.plist` -> `/Library/LaunchDaemons/`
-- `com.local.network-split-domestic-health.plist` -> `/Library/LaunchDaemons/`
-- `com.local.network-split-dns-event-route-agent.plist` -> `/Library/LaunchDaemons/`
-- `com.local.network-domain-proxy.plist` -> `/Library/LaunchDaemons/`
-- `homebrew.mxcl.dnsmasq.plist` -> `/Library/LaunchDaemons/`
-- `sshd-remote-access.conf` -> `/etc/ssh/sshd_config.d/050-remote-access.conf` (account name filled in at install)
+- `scripts/network-split-guard.sh` -> `/usr/local/sbin/network-split-guard.sh`
+- `scripts/china-route.sh` -> `/usr/local/sbin/china-route.sh`
+- `scripts/network-split-dns-event-route-agent.py` -> `/usr/local/sbin/`
+- `scripts/network_split_policy.py` -> `/usr/local/sbin/` (required by the DNS event agent and shell guards)
+- `scripts/network-split-domestic-health.sh` -> `/usr/local/sbin/`
+- `config/dnsmasq-network-split.conf` -> `/usr/local/etc/`
+- `config/china_ip_list.txt` -> `/usr/local/etc/`
+- `config/domestic_domains.conf` -> `/usr/local/etc/`
+- `config/domestic_extra_routes.txt` -> `/usr/local/etc/`
+- `config/launchd/com.local.china-route.plist` -> `/Library/LaunchDaemons/`
+- `config/launchd/com.local.network-split-guard.plist` -> `/Library/LaunchDaemons/`
+- `config/launchd/com.local.network-split-domestic-health.plist` -> `/Library/LaunchDaemons/`
+- `config/launchd/com.local.network-split-dns-event-route-agent.plist` -> `/Library/LaunchDaemons/`
+- `config/launchd/com.local.network-domain-proxy.plist` -> `/Library/LaunchDaemons/`
+- `config/launchd/homebrew.mxcl.dnsmasq.plist` -> `/Library/LaunchDaemons/`
+- `config/sshd-remote-access.conf` -> `/etc/ssh/sshd_config.d/050-remote-access.conf` (account name filled in at install)
 
 Deploy only the files listed in the active mapping. Retired implementations
 remain available in Git history, not in the current deployment or test suite.
@@ -214,9 +252,9 @@ remain available in Git history, not in the current deployment or test suite.
 
 | Role | Files | Use on this Mac |
 | --- | --- | --- |
-| Runtime | `network-domain-proxy-run.py`, `network-split-dns-event-route-agent.py`, `network-split-guard.sh`, `china-route.sh`, `network-split-domestic-health.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
-| Shared dependency | `network_split_policy.py` | Required by the event agent and both routing scripts; not a redundant daemon |
-| Maintenance | `build-domain-proxy.py`, `deploy-domain-proxy.py`, `deploy-security-update.zsh`, `deploy-remote-access.zsh`, `install-network-split-dns-event-route-agent.sh` | Manual build, deployment and installation tools, not background jobs; installation can restart services |
+| Runtime | `scripts/network-domain-proxy-run.py`, `scripts/network-split-dns-event-route-agent.py`, `scripts/network-split-guard.sh`, `scripts/china-route.sh`, `scripts/network-split-domestic-health.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
+| Shared dependency | `scripts/network_split_policy.py` | Required by the event agent and both routing scripts; not a redundant daemon |
+| Maintenance | `scripts/build-domain-proxy.py`, `scripts/deploy-domain-proxy.py`, `scripts/deploy-security-update.zsh`, `scripts/deploy-remote-access.zsh`, `scripts/install-network-split-dns-event-route-agent.sh` | Manual build, deployment and installation tools, not background jobs; installation can restart services |
 | Verification | The ten files in `tests/` | Retained tests, not launchd jobs; `domain_proxy_live_evidence.py` accesses the live network and requires administrator authorization |
 
 Source/deployed copies have different roles: the repository is the editable
@@ -298,7 +336,7 @@ and trials. The steady 120-second stage targets 75% fewer probes than 30 seconds
 these are replay/count results, not measured live traffic or playback gains.
 
 Deployment is separate from source acceptance: after administrator approval,
-replace only the mapped `network-split-domestic-health.sh` atomically while
+replace only the mapped `scripts/network-split-domestic-health.sh` atomically while
 holding its existing health lock. Validate syntax and retain the prior deployed
 file until the first scheduled run and state/log checks pass. Do not restart
 the proxy, DNS, route guard or event observer. Rollback restores that one file;
@@ -319,7 +357,7 @@ Keep both policy files and their parent directory root-owned and not writable by
 unprivileged accounts. Never automatically add exceptions from DNS answers.
 
 Install the policy module before replacing the DNS event agent or shell guards.
-Deploy `china-route.sh` and `network-split-guard.sh` together: their lock and
+Deploy `scripts/china-route.sh` and `scripts/network-split-guard.sh` together: their lock and
 force marker now live under root-only-writable `/var/db`, with no `/tmp` fallback.
 Let an existing route rebuild finish before replacement; restart the DNS event
 agent only if it is already enabled. Do not restart dnsmasq merely to update these

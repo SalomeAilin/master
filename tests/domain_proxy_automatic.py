@@ -12,7 +12,7 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("builder", ROOT / "build-domain-proxy.py")
+spec = importlib.util.spec_from_file_location("builder", ROOT / "scripts" / "build-domain-proxy.py")
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
@@ -51,7 +51,7 @@ def run(binary):
     try:
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
-            config = builder.build(ROOT, directory, directory / "cache.db")
+            config = builder.build(ROOT / "config", directory, directory / "cache.db")
             config["log"]["level"] = "debug"
             with socket.socket() as reservation:
                 reservation.bind(("127.0.0.1", 0))

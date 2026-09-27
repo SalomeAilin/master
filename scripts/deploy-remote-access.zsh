@@ -8,7 +8,7 @@ source_dir=${0:A:h}
 ssh_dir=${REMOTE_ACCESS_SSH_DIR:-/etc/ssh}
 sshd_main=$ssh_dir/sshd_config
 sshd_dropin=$ssh_dir/sshd_config.d/050-remote-access.conf
-template=$source_dir/sshd-remote-access.conf
+template=$source_dir/../config/sshd-remote-access.conf
 marker='# Installed as /etc/ssh/sshd_config.d/050-remote-access.conf by deploy-remote-access.zsh.'
 required=(passwordauthentication:no kbdinteractiveauthentication:no
   authenticationmethods:publickey permitrootlogin:no)

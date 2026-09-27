@@ -5,14 +5,14 @@ import unittest
 import ipaddress
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("builder", ROOT / "build-domain-proxy.py")
+spec = importlib.util.spec_from_file_location("builder", ROOT / "scripts" / "build-domain-proxy.py")
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
 
 class DomainProxyTests(unittest.TestCase):
     def setUp(self):
-        self.config = builder.build(ROOT)
+        self.config = builder.build(ROOT / "config")
         self.suffixes = self.config["route"]["rules"][1]["domain_suffix"]
 
     def domestic(self, name):

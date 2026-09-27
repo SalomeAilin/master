@@ -12,12 +12,12 @@ import unittest
 from unittest.mock import mock_open, patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
 import network_split_policy as policy
 
 
 def module(filename):
-    spec = importlib.util.spec_from_file_location(filename, ROOT / filename)
+    spec = importlib.util.spec_from_file_location(filename, ROOT / "scripts" / filename)
     result = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(result)
     return result
@@ -122,7 +122,7 @@ class LogRotationTests(unittest.TestCase):
 
 class SecurityTests(unittest.TestCase):
     def setUp(self):
-        policy.POLICY_FILES = tuple(str(ROOT / name) for name in (
+        policy.POLICY_FILES = tuple(str(ROOT / "config" / name) for name in (
             "china_ip_list.txt", "domestic_extra_routes.txt"))
         policy._signature = None
 
@@ -177,13 +177,13 @@ class SecurityTests(unittest.TestCase):
             run.assert_not_called()
 
     def test_coordination_and_log_permissions(self):
-        china = (ROOT / "china-route.sh").read_text()
-        guard = (ROOT / "network-split-guard.sh").read_text()
+        china = (ROOT / "scripts" / "china-route.sh").read_text()
+        guard = (ROOT / "scripts" / "network-split-guard.sh").read_text()
         self.assertNotIn('/tmp/china-route', china + guard)
         self.assertIn('zsystem flock -t 0 -f lock_fd "$LOCK_FILE"', china)
         for script in (china, guard):
             self.assertIn('FORCE_REBUILD_FILE="/var/db/china-route-force-rebuild"', script)
-        installer = (ROOT / "install-network-split-dns-event-route-agent.sh").read_text()
+        installer = (ROOT / "scripts" / "install-network-split-dns-event-route-agent.sh").read_text()
         self.assertIn('/bin/chmod 660 "$DNS_LOG"', installer)
         self.assertNotIn('/bin/chmod 644 "$DNS_LOG"', installer)
 

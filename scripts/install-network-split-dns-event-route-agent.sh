@@ -12,7 +12,7 @@ STAMP="$(/bin/date +%Y%m%d-%H%M%S)"
 /usr/bin/install -o root -g wheel -m 644 "$SOURCE_DIR/network_split_policy.py" /usr/local/sbin/network_split_policy.py
 /bin/cp "$SOURCE_DIR/network-split-dns-event-route-agent.py" "$AGENT_TARGET"
 /bin/chmod 755 "$AGENT_TARGET"
-/bin/cp "$SOURCE_DIR/com.local.network-split-dns-event-route-agent.plist" "$PLIST_TARGET"
+/bin/cp "$SOURCE_DIR/../config/launchd/com.local.network-split-dns-event-route-agent.plist" "$PLIST_TARGET"
 /usr/bin/plutil -lint "$PLIST_TARGET"
 
 /bin/cp "$DNS_CONFIG" "${DNS_CONFIG}.bak.${STAMP}"

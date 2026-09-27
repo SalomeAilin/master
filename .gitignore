@@ -4,3 +4,6 @@ __pycache__/
 
 # Generated live status can contain local network details.
 network-split-status.html
+
+# Personal documents and preserved local artifacts are not public source.
+/local/

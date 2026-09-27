@@ -5,9 +5,9 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail() { print -u2 "FAIL $*"; exit 1; }
 
-/bin/zsh -n deploy-remote-access.zsh
-eval "$(sed -n -E '/^(ssh_dir|sshd_dropin|marker)=/p' deploy-remote-access.zsh)"
-[[ $(head -n 1 sshd-remote-access.conf) = "$marker" ]] || fail 'template must start with the marker uninstall checks'
+/bin/zsh -n scripts/deploy-remote-access.zsh
+eval "$(sed -n -E '/^(ssh_dir|sshd_dropin|marker)=/p' scripts/deploy-remote-access.zsh)"
+[[ $(head -n 1 config/sshd-remote-access.conf) = "$marker" ]] || fail 'template must start with the marker uninstall checks'
 # sshd keeps the first value it reads, so the drop-in must sort before Apple's.
 [[ ${sshd_dropin:h} = /etc/ssh/sshd_config.d && ${sshd_dropin:t} < 100-macos.conf ]]
 grep -qx 'Include /etc/ssh/sshd_config.d/\*' /etc/ssh/sshd_config
@@ -15,15 +15,15 @@ print 'PASS drop-in carries the marker, is included and precedes 100-macos.conf'
 
 # Without pf, SSH replies rely on the Wi-Fi-loss reject routes being gateway
 # routes: XNU scoped lookups skip lo0 routes only when they carry RTF_GATEWAY.
-eval "$(sed -n -E '/^FOREIGN_BLOCK_GW=/p' network-split-guard.sh)"
-block_routes=$(sed -n '/^ensure_foreign_block_routes() {/,/^}/p' network-split-guard.sh)
+eval "$(sed -n -E '/^FOREIGN_BLOCK_GW=/p' scripts/network-split-guard.sh)"
+block_routes=$(sed -n '/^ensure_foreign_block_routes() {/,/^}/p' scripts/network-split-guard.sh)
 [[ $FOREIGN_BLOCK_GW = 127.0.0.1 ]]
 [[ $block_routes == *'route -n add -net 0.0.0.0/1 "$FOREIGN_BLOCK_GW" -reject'* ]]
 [[ $block_routes == *'route -n add -net 128.0.0.0/1 "$FOREIGN_BLOCK_GW" -reject'* ]]
 [[ $block_routes != *-interface* && $block_routes != *-iface* ]]
 print 'PASS Wi-Fi-loss reject routes stay gateway routes that scoped SSH replies bypass'
 
-if env -u REMOTE_ACCESS_SSH_DIR zsh deploy-remote-access.zsh status >/dev/null 2>&1; then
+if env -u REMOTE_ACCESS_SSH_DIR zsh scripts/deploy-remote-access.zsh status >/dev/null 2>&1; then
   fail 'the real /etc/ssh must require administrator rights'
 fi
 print 'PASS the real /etc/ssh requires administrator rights'
@@ -46,11 +46,11 @@ effective() {
     -C "user=$1,host=remote.invalid,addr=203.0.113.1")"}$'\n'
 }
 
-if run zsh deploy-remote-access.zsh >/dev/null 2>&1; then fail 'no action must not install'; else code=$?; fi
+if run zsh scripts/deploy-remote-access.zsh >/dev/null 2>&1; then fail 'no action must not install'; else code=$?; fi
 [[ $code = 2 && ! -e $dropin ]]
 print 'PASS running without an action prints usage and changes nothing'
 
-out=$(run REMOTE_USER="$USER" zsh deploy-remote-access.zsh install 2>&1) || fail "install: $out"
+out=$(run REMOTE_USER="$USER" zsh scripts/deploy-remote-access.zsh install 2>&1) || fail "install: $out"
 [[ $(head -n 1 "$dropin") = "$marker" ]] && grep -qx "AllowUsers $USER" "$dropin"
 [[ -z $(print -l "$tree"/.remote-access-stage.*(N)) ]] || fail 'stage directory left behind'
 eff=$(effective "$USER")
@@ -59,31 +59,31 @@ for setting in 'passwordauthentication no' 'kbdinteractiveauthentication no' \
   [[ $eff == *$'\n'"$setting"$'\n'* ]] || fail "effective setting missing after install: $setting"
 done
 [[ $out == *"sshd: key-only login for $USER"* ]] || fail "install status: $out"
-run REMOTE_USER="$USER" zsh deploy-remote-access.zsh install >/dev/null 2>&1 || fail 'reinstall for the same account'
+run REMOTE_USER="$USER" zsh scripts/deploy-remote-access.zsh install >/dev/null 2>&1 || fail 'reinstall for the same account'
 print 'PASS install activates key-only login for one account and cleans its stage'
 
 before=$(shasum "$dropin")
-if run SUDO_USER=daemon zsh deploy-remote-access.zsh install >/dev/null 2>&1; then
+if run SUDO_USER=daemon zsh scripts/deploy-remote-access.zsh install >/dev/null 2>&1; then
   fail 'a reinstall from another sudo account changed AllowUsers'
 fi
 [[ $(shasum "$dropin") = "$before" ]]
 print 'PASS a reinstall from another account cannot silently change AllowUsers'
 
 print 'AuthenticationMethods any' > "$tree/sshd_config.d/010-weaker.conf"
-if run REMOTE_USER="$USER" zsh deploy-remote-access.zsh install >/dev/null 2>&1; then
+if run REMOTE_USER="$USER" zsh scripts/deploy-remote-access.zsh install >/dev/null 2>&1; then
   fail 'install accepted an earlier drop-in that overrides it'
 fi
 [[ $(shasum "$dropin") = "$before" ]]
-out=$(run REMOTE_USER="$USER" zsh deploy-remote-access.zsh status 2>&1)
+out=$(run REMOTE_USER="$USER" zsh scripts/deploy-remote-access.zsh status 2>&1)
 [[ $out == *'WARNING the effective settings are weaker'* ]] || fail "status must flag the override: $out"
 rm "$tree/sshd_config.d/010-weaker.conf"
 print 'PASS an earlier drop-in that weakens login blocks install and shows in status'
 
 cp "$dropin" "$tmp/ours"
 print '# not ours' > "$dropin"
-if run zsh deploy-remote-access.zsh uninstall >/dev/null 2>&1; then fail 'uninstall removed a foreign file'; fi
+if run zsh scripts/deploy-remote-access.zsh uninstall >/dev/null 2>&1; then fail 'uninstall removed a foreign file'; fi
 [[ -f $dropin ]]
 cp "$tmp/ours" "$dropin"
-run zsh deploy-remote-access.zsh uninstall >/dev/null 2>&1 || fail 'uninstall'
+run zsh scripts/deploy-remote-access.zsh uninstall >/dev/null 2>&1 || fail 'uninstall'
 [[ ! -e $dropin ]]
 print 'PASS uninstall removes only its own drop-in'

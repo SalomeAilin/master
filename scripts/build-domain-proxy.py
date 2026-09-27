@@ -104,4 +104,5 @@ if __name__ == "__main__":
     parser.add_argument("--rules-directory", type=Path, default=RULES_DIRECTORY)
     parser.add_argument("--cache-path", default=CACHE_PATH)
     args = parser.parse_args()
-    args.output.write_text(json.dumps(build(Path(__file__).resolve().parent, args.rules_directory, args.cache_path), indent=2) + "\n")
+    policy_dir = Path(__file__).resolve().parents[1] / "config"
+    args.output.write_text(json.dumps(build(policy_dir, args.rules_directory, args.cache_path), indent=2) + "\n")

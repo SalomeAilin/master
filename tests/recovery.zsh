@@ -1,12 +1,12 @@
 #!/bin/zsh
 set -eu
 cd "${0:A:h}/.."
-eval "$(sed -n '/^HEALTH_CHECK_TARGETS=/p' china-route.sh)"
+eval "$(sed -n '/^HEALTH_CHECK_TARGETS=/p' scripts/china-route.sh)"
 [[ ${#HEALTH_CHECK_TARGETS} -eq 5 ]]
 for target in $HEALTH_CHECK_TARGETS; do [[ "$target" != *' '* ]]; done
 print 'PASS five independent health targets'
 
-eval "$(sed -n '/^check_domestic_domains() {/,/^}/p' network-split-guard.sh)"
+eval "$(sed -n '/^check_domestic_domains() {/,/^}/p' scripts/network-split-guard.sh)"
 DOMESTIC_DOMAIN_LIST=/nonexistent/network-split-test
 calls=0
 check_domestic_domain() {
@@ -22,7 +22,7 @@ route_failure=yes
 if check_domestic_domains; then exit 1; fi
 print 'PASS DNS failure does not request rebuild or stop later checks'
 
-eval "$(sed -n '/^ensure_foreign_default_route() {/,/^}/p' network-split-guard.sh)"
+eval "$(sed -n '/^ensure_foreign_default_route() {/,/^}/p' scripts/network-split-guard.sh)"
 ETH_GW=192.168.1.1
 ETH_IF=en0
 WIFI_IF=en1
@@ -53,7 +53,7 @@ print 'PASS switching order and fail-closed error branches'
 
 # Wi-Fi can recover during the domestic scan, with reject routes still present.
 (
-  eval "$(sed -n '/^protect_foreign_priority() {/,/^}/p' network-split-guard.sh)"
+  eval "$(sed -n '/^protect_foreign_priority() {/,/^}/p' scripts/network-split-guard.sh)"
   read_default_route() { print '172.20.10.1 en1'; }
   foreign_default_route_active() { return 0; }
   default_route_matches() { return 0; }
@@ -88,7 +88,7 @@ cleanup() {
   rm -r "$test_dir"
 }
 trap cleanup EXIT
-guard_lock=$(sed -n '/^umask 077$/,/^zsystem flock /p' network-split-guard.sh)
+guard_lock=$(sed -n '/^umask 077$/,/^zsystem flock /p' scripts/network-split-guard.sh)
 [[ "$guard_lock" = *'zsystem flock -t 0 -f lock_fd "$LOCK_FILE" || exit 0'* ]]
 zsh -c 'LOCK_FILE="$1"; eval "$3"; touch "$2"; zmodload zsh/zselect; zselect -t 1000' test "$lock_path" "$ready_path" "$guard_lock" &
 owner=$!
@@ -108,8 +108,8 @@ zsh -c 'LOCK_FILE="$1"; eval "$3"; touch "$2"' test "$lock_path" "$test_dir/reco
 print 'PASS actual guard lock excludes overlap and recovers after SIGKILL'
 
 # A health failure must not start a second script or kill an existing guard.
-eval "$(sed -n '/^GUARD_SERVICE=/p' network-split-domestic-health.sh)"
-recovery=$(sed -n '/^if \[ "$reason" = "route_drift" \]; then/,/^fi$/p' network-split-domestic-health.sh)
+eval "$(sed -n '/^GUARD_SERVICE=/p' scripts/network-split-domestic-health.sh)"
+recovery=$(sed -n '/^if \[ "$reason" = "route_drift" \]; then/,/^fi$/p' scripts/network-split-domestic-health.sh)
 [[ "$recovery" != *ROOT_GUARD* && "$recovery" = *'/bin/launchctl kickstart "$GUARD_SERVICE"'* ]]
 recovery=${recovery//\/bin\/launchctl/mock_launchctl}
 mock_launchctl() { launch_calls+=("$*"); return "$launch_result"; }
@@ -137,7 +137,7 @@ print 'PASS health recovery uses one non-restarting launchd request, only for dr
 # Exercise adaptive scheduling with a fake clock, never the live health service.
 (
   for name in reset_probe_schedule load_probe_schedule write_state probe_due record_probe_sample; do
-    eval "$(sed -n "/^${name}() {/,/^}/p" network-split-domestic-health.sh)"
+    eval "$(sed -n "/^${name}() {/,/^}/p" scripts/network-split-domestic-health.sh)"
   done
   STATE_FILE="$test_dir/health.state"
   schedule_logs=()
@@ -264,7 +264,7 @@ print 'PASS health recovery uses one non-restarting launchd request, only for dr
     -e 's|^now=\$EPOCHSECONDS$|now=$fake_now|' \
     -e 's|/usr/bin/curl|mock_curl|g' \
     -e 's|/sbin/route|mock_route|g' \
-    -e 's|/bin/launchctl|mock_launchctl|g' network-split-domestic-health.sh)"
+    -e 's|/bin/launchctl|mock_launchctl|g' scripts/network-split-domestic-health.sh)"
   mock_curl() {
     print called >> "$requests"
     print "$response|223.5.5.5|192.0.2.1"
