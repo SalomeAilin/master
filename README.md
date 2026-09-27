@@ -17,6 +17,10 @@ This repository backs up the active split-routing configuration for this Mac.
 | `sing-box/` | Upstream engine source as a squashed Git subtree |
 | `local/` | Private working documents and preserved local caches; ignored by Git |
 
+File organization is part of every project task, checked at task start and
+completion. Follow the [automatic organization rules](AGENTS.md) when creating,
+moving, archiving, or cleaning up task files.
+
 Run repository commands from the repository root. For example:
 
 ```sh
