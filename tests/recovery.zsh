@@ -107,6 +107,25 @@ zsh -c 'LOCK_FILE="$1"; eval "$3"; touch "$2"' test "$lock_path" "$test_dir/reco
 [[ -e "$test_dir/recovered" ]]
 print 'PASS actual guard lock excludes overlap and recovers after SIGKILL'
 
+# Reap the actual child and preserve launchctl's failure instead of reporting success.
+(
+  body=$(sed -n '/^kickstart_system_service() {/,/^}/p' scripts/network-split-guard.sh)
+  eval "${body//exec \/bin\/launchctl/mock_launchctl}"
+  KICKSTART_TIMEOUT_SECONDS=2
+  log() { print -r -- "$*" >> "$test_dir/kickstart.log"; }
+  mock_launchctl() { return "$launch_result"; }
+  for launch_result in 0 5; do
+    if kickstart_system_service start test.fixture; then result=0; else result=$?; fi
+    [[ $result = $launch_result ]]
+  done
+  grep -q 'exit=5' "$test_dir/kickstart.log"
+  mock_launchctl() { while true; do :; done; }
+  KICKSTART_TIMEOUT_SECONDS=0
+  if kickstart_system_service start test.fixture; then exit 1; fi
+  [[ -z "$(jobs -p)" ]]
+)
+print 'PASS service start failures propagate and timed-out children are reaped'
+
 # A health failure must not start a second script or kill an existing guard.
 eval "$(sed -n '/^GUARD_SERVICE=/p' scripts/network-split-domestic-health.sh)"
 recovery=$(sed -n '/^if \[ "$reason" = "route_drift" \]; then/,/^fi$/p' scripts/network-split-domestic-health.sh)

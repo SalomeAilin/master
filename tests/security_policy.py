@@ -120,6 +120,62 @@ class LogRotationTests(unittest.TestCase):
             root.handlers, root.level = previous_handlers, previous_level
 
 
+class QueryCorrelationTests(unittest.TestCase):
+    def setUp(self):
+        self.queries = {}
+        self.now = 100
+        self.clock = patch.object(event.time, "monotonic", side_effect=lambda: self.now)
+        self.clock.start()
+        self.addCleanup(self.clock.stop)
+        self.bind = patch.object(event, "bind_ethernet_route")
+        self.sink = self.bind.start()
+        self.addCleanup(self.bind.stop)
+
+    def line(self, value, pid="1", query_id="7", client="client"):
+        event.process_line(f"dnsmasq[{pid}]: {query_id} {client} {value}", {"cn"}, self.queries)
+
+    def test_cname_chain_stays_with_its_query_not_shared_cdn(self):
+        self.line("query[A] good.cn from client")
+        self.line("reply good.cn is shared.example")
+        self.line("reply shared.example is 223.5.5.5")
+        self.sink.assert_called_once_with("good.cn", "223.5.5.5")
+        self.sink.reset_mock()
+        self.line("query[A] foreign.example from client", query_id="8")
+        self.line("reply shared.example is 223.5.5.5", query_id="8")
+        self.sink.assert_not_called()
+
+    def test_reused_query_id_is_not_inherited_by_foreign_query(self):
+        self.line("query[A] good.cn from client")
+        self.line("query[A] foreign.example from client")
+        self.line("reply shared.example is 223.5.5.5")
+        self.sink.assert_not_called()
+        self.assertEqual(self.queries, {})
+
+    def test_pid_and_client_are_part_of_query_identity(self):
+        self.line("query[A] good.cn from client")
+        self.line("reply shared.example is 223.5.5.5", pid="2")
+        self.line("reply shared.example is 223.5.5.5", client="other")
+        self.sink.assert_not_called()
+
+    def test_expired_query_cannot_classify_a_late_cname_answer(self):
+        self.line("query[A] good.cn from client")
+        self.now += event.QUERY_TTL_SECONDS
+        self.line("reply shared.example is 223.5.5.5")
+        self.sink.assert_not_called()
+        self.assertEqual(self.queries, {})
+
+    def test_cache_is_bounded_and_updated_queries_expire_in_order(self):
+        with patch.object(event, "MAX_PENDING_QUERIES", 2):
+            for query_id in ("1", "2", "1", "3"):
+                self.line("query[A] good.cn from client", query_id=query_id)
+                self.now += 1
+            self.assertEqual(list(self.queries), [("1", "1", "client"), ("1", "3", "client")])
+            self.now = 132
+            self.line("reply shared.example is 223.5.5.5", query_id="1")
+            self.sink.assert_not_called()
+            self.assertEqual(len(self.queries), 1)
+
+
 class SecurityTests(unittest.TestCase):
     def setUp(self):
         policy.POLICY_FILES = tuple(str(ROOT / "config" / name) for name in (
@@ -144,11 +200,11 @@ class SecurityTests(unittest.TestCase):
 
     def test_hostile_dns_and_alias_do_not_touch_routes(self):
         with patch.object(event.subprocess, "run") as run:
-            queries, aliases = {}, {}
-            event.process_line("dnsmasq[1]: 7 client query[A] evil.cn from client", {"cn"}, aliases, queries)
+            queries = {}
+            event.process_line("dnsmasq[1]: 7 client query[A] evil.cn from client", {"cn"}, queries)
             for line in ("dnsmasq[1]: 7 client reply evil.cn is 8.8.8.8",
                          "dnsmasq[1]: 7 client reply alias.example is 1.1.1.1"):
-                event.process_line(line, {"cn"}, aliases, queries)
+                event.process_line(line, {"cn"}, queries)
             run.assert_not_called()
 
     def test_event_sink_enforces_policy_before_route_lookup(self):
@@ -166,13 +222,13 @@ class SecurityTests(unittest.TestCase):
 
     def test_denied_answer_does_not_block_later_domestic_answer(self):
         with patch.object(event, "route_is_ethernet", return_value=True) as lookup, patch.object(event.subprocess, "run") as run:
-            queries, aliases = {}, {}
-            event.process_line("dnsmasq[1]: 7 client query[A] good.cn from client", {"cn"}, aliases, queries)
-            event.process_line("dnsmasq[1]: 7 client reply good.cn is 8.8.8.8", {"cn"}, aliases, queries)
+            queries = {}
+            event.process_line("dnsmasq[1]: 7 client query[A] good.cn from client", {"cn"}, queries)
+            event.process_line("dnsmasq[1]: 7 client reply good.cn is 8.8.8.8", {"cn"}, queries)
             lookup.assert_not_called()
             run.assert_not_called()
-            self.assertEqual(queries["7"][0], "good.cn")
-            event.process_line("dnsmasq[1]: 7 client reply good.cn is 223.5.5.5", {"cn"}, aliases, queries)
+            self.assertEqual(queries[("1", "7", "client")][0], "good.cn")
+            event.process_line("dnsmasq[1]: 7 client reply good.cn is 223.5.5.5", {"cn"}, queries)
             lookup.assert_called_once_with("223.5.5.5")
             run.assert_not_called()
 

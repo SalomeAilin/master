@@ -94,14 +94,13 @@ dnsmasq_running() {
 }
 
 kickstart_system_service() {
-  mode="$1"
-  label="$2"
+  local mode="$1" label="$2" kick_pid waited result
 
   (
     if [ "$mode" = "restart" ]; then
-      /bin/launchctl kickstart -k "system/$label" >/dev/null 2>&1
+      exec /bin/launchctl kickstart -k "system/$label" >/dev/null 2>&1
     else
-      /bin/launchctl kickstart "system/$label" >/dev/null 2>&1
+      exec /bin/launchctl kickstart "system/$label" >/dev/null 2>&1
     fi
   ) &
   kick_pid=$!
@@ -112,6 +111,7 @@ kickstart_system_service() {
       /bin/kill -TERM "$kick_pid" >/dev/null 2>&1 || true
       /bin/sleep 1
       /bin/kill -KILL "$kick_pid" >/dev/null 2>&1 || true
+      wait "$kick_pid" 2>/dev/null || true
       log "launchctl kickstart timeout label=$label mode=$mode after=${KICKSTART_TIMEOUT_SECONDS}s"
       return 1
     fi
@@ -120,8 +120,13 @@ kickstart_system_service() {
     waited=$((waited + 1))
   done
 
-  /bin/wait "$kick_pid" >/dev/null 2>&1
-  return 0
+  if wait "$kick_pid"; then
+    return 0
+  else
+    result=$?
+    log "launchctl kickstart failed label=$label mode=$mode exit=$result"
+    return "$result"
+  fi
 }
 
 ensure_dnsmasq() {

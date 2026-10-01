@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Install separately from activation; restore the exact prior proxy settings."""
 import argparse
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -19,11 +22,26 @@ CONFIG = Path("/usr/local/etc/network-domain-proxy.json")
 CACHE = Path("/var/db/network-domain-proxy/cache.db")
 RULES = Path("/usr/local/etc/network-domain-rules")
 BINARY = "/usr/local/libexec/network-domain-sing-box"
+DEPLOY_LOCK = Path("/var/db/network-domain-proxy.deploy.lock")
 RULE_NAMES = ("geosite-geolocation-cn", "geosite-geolocation-!cn", "geoip-cn")
 
 
 def run(*args):
-    return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
+    return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT, timeout=30)
+
+
+@contextmanager
+def deployment_lock():
+    fd = os.open(DEPLOY_LOCK, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "rb") as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise RuntimeError("Unsafe deployment lock")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Another proxy deployment is active") from None
+        yield
 
 
 def start_service():
@@ -35,6 +53,32 @@ def start_service():
             if error.returncode != 5 or attempt == 9:
                 raise
             time.sleep(0.5)
+
+
+def stop_service():
+    details = run("/bin/launchctl", "print", LABEL)
+    pid = next((int(line.split("=", 1)[1]) for line in details.splitlines()
+                if line.strip().startswith("pid = ")), None)
+    run("/bin/launchctl", "bootout", LABEL)
+    if pid is not None:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        raise RuntimeError("Service is still exiting; refusing to replace live files")
+
+
+def stop_candidate():
+    try:
+        run("/bin/launchctl", "print", LABEL)
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 113:
+            return
+        raise
+    stop_service()
 
 
 def settings():
@@ -61,14 +105,17 @@ def restore(saved):
 
 def install_file(source, target, mode):
     target = Path(target)
-    temporary = target.with_name(target.name + ".domain-new")
-    if temporary.exists() or temporary.is_symlink():
-        raise RuntimeError("Unexpected staging file: " + str(temporary))
-    with temporary.open("xb") as output, Path(source).open("rb") as data:
-        shutil.copyfileobj(data, output)
-    os.chmod(temporary, mode)
-    os.chown(temporary, 0, 0)
-    os.replace(temporary, target)
+    fd, temporary = tempfile.mkstemp(prefix="." + target.name + ".", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as output, Path(source).open("rb") as data:
+            shutil.copyfileobj(data, output)
+            output.flush()
+            os.fchmod(output.fileno(), mode)
+            os.fchown(output.fileno(), 0, 0)
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def prepare_automatic_data(root):
@@ -126,23 +173,52 @@ def warm_rule_cache(root, directory):
     raise RuntimeError("Rule cache preflight failed; live configuration was not changed")
 
 
+def restore_automatic_backup(backup):
+    install_file(backup / "config.json", CONFIG, 0o644)
+    for name in RULE_NAMES:
+        previous = backup / "rules" / (name + ".srs")
+        if previous.exists():
+            install_file(previous, RULES / previous.name, 0o644)
+        else:
+            (RULES / previous.name).unlink(missing_ok=True)
+    if not (backup / "rules").exists() and RULES.exists():
+        RULES.rmdir()
+    if (backup / "cache.db").exists():
+        install_file(backup / "cache.db", CACHE, 0o600)
+        shutil.chown(CACHE, user="nobody", group="wheel")
+    else:
+        CACHE.unlink(missing_ok=True)
+
+
 def update_automatic(root):
     run(BINARY, "check", "-c", str(root / "config.json"))
-    backup = Path(tempfile.mkdtemp(prefix="network-domain-auto-backup.", dir="/var/db"))
-    shutil.copy2(CONFIG, backup / "config.json")
-    if RULES.exists():
-        if RULES.is_symlink() or RULES.stat().st_uid != 0 or RULES.stat().st_mode & 0o022:
-            raise RuntimeError("Unsafe rule seed directory")
-        shutil.copytree(RULES, backup / "rules")
+    if RULES.is_symlink() or (RULES.exists() and
+            (RULES.stat().st_uid != 0 or RULES.stat().st_mode & 0o022)):
+        raise RuntimeError("Unsafe rule seed directory")
     with tempfile.TemporaryDirectory(prefix="network-domain-preflight.", dir="/var/db") as temporary:
         directory = Path(temporary)
         shutil.chown(directory, user="nobody", group="wheel")
         warmed_cache = warm_rule_cache(root, directory)
-        stopped = False
+        for name in RULE_NAMES:
+            run(BINARY, "rule-set", "decompile", str(root / (name + ".srs")), "-o", "/dev/null")
+        backup = Path(tempfile.mkdtemp(prefix="network-domain-auto-backup.", dir="/var/db"))
         try:
-            prepare_automatic_data(root)
-            run("/bin/launchctl", "bootout", LABEL)
+            shutil.copy2(CONFIG, backup / "config.json")
+            if RULES.exists():
+                shutil.copytree(RULES, backup / "rules")
+        except BaseException:
+            shutil.rmtree(backup)
+            raise
+        stopped = False
+        files_changed = False
+        try:
+            stop_service()
             stopped = True
+            # The engine owns the cache: snapshot it only after its writer stops.
+            if CACHE.exists():
+                shutil.copy2(CACHE, backup / "cache.db")
+            files_changed = True
+            prepare_automatic_data(root)
             install_file(root / "config.json", CONFIG, 0o644)
             install_file(warmed_cache, CACHE, 0o600)
             shutil.chown(CACHE, user="nobody", group="wheel")
@@ -152,14 +228,24 @@ def update_automatic(root):
                 run("/usr/bin/curl", "--proxy", "http://127.0.0.1:17890", "--noproxy", "", "-fsS", "-o", "/dev/null", "--max-time", "15", url)
             run("/bin/launchctl", "print", LABEL)
         except BaseException:
-            install_file(backup / "config.json", CONFIG, 0o644)
-            if (backup / "rules").exists():
-                for name in RULE_NAMES:
-                    install_file(backup / "rules" / (name + ".srs"), RULES / (name + ".srs"), 0o644)
             if stopped:
-                subprocess.run(["/bin/launchctl", "bootout", LABEL], capture_output=True)
-                start_service()
-            print("Activation failed; previous proxy configuration restored. Backup:", backup, flush=True)
+                try:
+                    if files_changed:
+                        # Never replace a cache that a running candidate can still write.
+                        stop_candidate()
+                        restore_automatic_backup(backup)
+                    start_service()
+                except BaseException:
+                    print("Rollback incomplete; recovery backup retained:", backup, flush=True)
+                    raise
+                if files_changed:
+                    print("Activation failed; previous proxy configuration and cache restored. Backup:", backup, flush=True)
+                else:
+                    shutil.rmtree(backup)
+                    print("Backup failed; live files unchanged and previous service restarted", flush=True)
+            else:
+                shutil.rmtree(backup)
+                print("Could not stop service; live files were not changed", flush=True)
             raise
     print("Automatic classification active; backup:", backup)
 
@@ -172,9 +258,14 @@ def main():
         raise SystemExit("Administrator authorization required")
     os.umask(0o077)
     root = Path(__file__).resolve().parent
-    if args.action == "update-auto":
+    with deployment_lock():
+        apply_action(args.action, root)
+
+
+def apply_action(action, root):
+    if action == "update-auto":
         update_automatic(root)
-    elif args.action == "install":
+    elif action == "install":
         if Path(PLIST).exists():
             raise RuntimeError("Service already installed; refusing implicit replacement")
         binary = root / "sing-box-1.14.2-darwin-arm64/sing-box"
@@ -198,7 +289,7 @@ def main():
         shutil.chown(logdir, user="nobody", group="wheel")
         start_service()
         print("Service installed; system proxy settings unchanged")
-    elif args.action == "enable":
+    elif action == "enable":
         run("/bin/launchctl", "print", LABEL)
         for url in ("https://www.douyin.com/", "https://github.com/"):
             run("/usr/bin/curl", "--proxy", "http://127.0.0.1:17890", "--noproxy", "", "-f", "-sS", "-o", "/dev/null", "--max-time", "15", url)

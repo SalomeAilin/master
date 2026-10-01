@@ -122,6 +122,13 @@ Files:
   staged `deploy-domain-proxy.py` as administrator with the intended action;
   running the repository copy does not assemble those deployment inputs.
   No additional updater daemon is needed.
+  All actions take one private kernel lock, rejecting overlapping deployments.
+  `update-auto` validates and prewarms before stopping the live service, waits
+  for its process to exit, and snapshots the closed cache. Activation failure
+  stops the candidate before restoring configuration, seed rules and cache
+  together. If rollback itself fails, the recovery backup is retained and its
+  location is reported; it is not reported as a successful rollback. Failed
+  preflight and atomic file replacement clean their own staging artifacts.
   Cache prewarming avoids the observed first-background-download cancellation
   during initial network detection; cached startup does not immediately fetch.
   If both the runtime cache is lost and the initial background fetch fails,
@@ -237,6 +244,8 @@ Offline checks: `zsh tests/remote_access.zsh`.
 - `scripts/network-split-dns-event-route-agent.py` -> `/usr/local/sbin/`
 - `scripts/network_split_policy.py` -> `/usr/local/sbin/` (required by the DNS event agent and shell guards)
 - `scripts/network-split-domestic-health.sh` -> `/usr/local/sbin/`
+- `scripts/network-domain-proxy-run.py` -> `/usr/local/sbin/`
+- `scripts/deploy-domain-proxy.py` -> `/usr/local/sbin/network-domain-proxy-deploy.py` (manual maintenance entry, not a daemon)
 - `config/dnsmasq-network-split.conf` -> `/usr/local/etc/`
 - `config/china_ip_list.txt` -> `/usr/local/etc/`
 - `config/domestic_domains.conf` -> `/usr/local/etc/`
@@ -273,6 +282,16 @@ The domestic health check requests the existing launchd guard with `kickstart`
 without `-k`, so it does not start a separate shell guard or terminate an active
 repair. HTTP errors and slow responses alone do not request route repair.
 This serializes guard instances, not every component that manages routes.
+Service-start requests use the actual child exit status, with a bounded timeout
+and child reaping; a failed `launchctl` request must not be reported as success.
+
+The DNS event observer correlates CNAME replies only within the same dnsmasq
+process, query ID and client. It no longer retains a global shared-CDN alias
+map. Pending domestic queries expire after 30 seconds and are capped at 4096;
+reused IDs, resolver configuration reloads and query-log changes discard stale
+context. Address policy still authorizes every route mutation. This removes
+cross-query classification inheritance, not the remaining limitations of
+global IP routes for non-proxy clients.
 
 The end-of-scan recovery check reconciles foreign fallback blocks even when
 macOS has already restored a Wi-Fi default route. A correct default alone does

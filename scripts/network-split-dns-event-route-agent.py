@@ -17,11 +17,13 @@ DNSMASQ_LOG = "/var/log/dnsmasq-network-split-query.log"
 DNSMASQ_CONFIG = "/usr/local/etc/dnsmasq-network-split.conf"
 LOG_FILE = "/var/log/network-split-dns-event-route-agent.log"
 MAX_DNSMASQ_LOG_BYTES = 64 * 1024 * 1024
+QUERY_TTL_SECONDS = 30
+MAX_PENDING_QUERIES = 4096
 ETH_GATEWAY = "192.168.1.1"
 ETH_INTERFACE = "en0"
 
-QUERY_RE = re.compile(r"dnsmasq\[\d+\]:\s+(\d+)\s+\S+\s+query\[[^]]+\]\s+(\S+)\s+from")
-ANSWER_RE = re.compile(r"dnsmasq\[\d+\]:\s+(\d+)\s+\S+\s+(?:reply|cached)\s+(\S+)\s+is\s+(\S+)")
+QUERY_RE = re.compile(r"dnsmasq\[(\d+)\]:\s+(\d+)\s+(\S+)\s+query\[[^]]+\]\s+(\S+)\s+from")
+ANSWER_RE = re.compile(r"dnsmasq\[(\d+)\]:\s+(\d+)\s+(\S+)\s+(?:reply|cached)\s+(\S+)\s+is\s+(\S+)")
 IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
 
 
@@ -92,44 +94,43 @@ def bind_ethernet_route(domain, ip):
         logging.error("route bind failed domain=%s ip=%s exit=%s error=%s", domain, ip, result.returncode, result.stderr.strip())
 
 
-def follow_alias(name, aliases):
-    name = normalized(name)
-    seen = set()
-    while name in aliases and name not in seen:
-        seen.add(name)
-        name = aliases[name]
-    return name
-
-
-def process_line(line, suffixes, aliases, domestic_queries):
+def process_line(line, suffixes, domestic_queries):
+    now = time.monotonic()
+    # Insertion order is also expiry order; avoid rescanning every pending query.
+    while domestic_queries:
+        key = next(iter(domestic_queries))
+        if now - domestic_queries[key][1] < QUERY_TTL_SECONDS:
+            break
+        del domestic_queries[key]
     query = QUERY_RE.search(line)
     if query:
-        query_id, domain = query.groups()
+        pid, query_id, client, domain = query.groups()
+        key = (pid, query_id, client)
+        domestic_queries.pop(key, None)
         domain = normalized(domain)
         if is_domestic(domain, suffixes):
-            domestic_queries[query_id] = (domain, time.monotonic())
+            if len(domestic_queries) >= MAX_PENDING_QUERIES:
+                del domestic_queries[next(iter(domestic_queries))]
+            domestic_queries[key] = (domain, now)
         return
 
     match = ANSWER_RE.search(line)
     if not match:
         return
-    query_id, name, value = match.groups()
+    pid, query_id, client, name, value = match.groups()
     name, value = normalized(name), normalized(value)
-    origin = domestic_queries.get(query_id, (follow_alias(name, aliases), 0))[0]
+    origin = domestic_queries.get((pid, query_id, client), (name, 0))[0]
     if IPV4_RE.match(value):
         if is_domestic(name, suffixes) or is_domestic(origin, suffixes):
             bind_ethernet_route(origin, value)
         return
-    # dnsmasq emits CNAME replies in the same form; retain only domestic chains.
-    if is_domestic(name, suffixes) or is_domestic(origin, suffixes):
-        aliases[value] = origin
+    # CNAME answers share the query identity. Never retain global CDN aliases.
 
 
 def main():
     setup_logging()
     suffixes = load_suffixes()
     config_mtime = os.path.getmtime(DNSMASQ_CONFIG)
-    aliases = {}
     domestic_queries = {}
     inode = None
     stream = None
@@ -142,11 +143,12 @@ def main():
             if current_mtime != config_mtime:
                 suffixes = load_suffixes()
                 config_mtime = current_mtime
-                aliases.clear()
+                domestic_queries.clear()
                 logging.info("reloaded suffixes=%s", len(suffixes))
 
             stat = os.stat(DNSMASQ_LOG)
             if stream is None or inode != stat.st_ino or stat.st_size < position:
+                domestic_queries.clear()
                 if stream is not None:
                     stream.close()
                 stream = open(DNSMASQ_LOG, "r", encoding="utf-8", errors="replace")
@@ -167,11 +169,7 @@ def main():
                 time.sleep(0.05)
                 continue
             position = stream.tell()
-            process_line(line, suffixes, aliases, domestic_queries)
-            now = time.monotonic()
-            for query_id, (_, seen_at) in list(domestic_queries.items()):
-                if now - seen_at > 30:
-                    del domestic_queries[query_id]
+            process_line(line, suffixes, domestic_queries)
         except FileNotFoundError:
             time.sleep(0.2)
         except Exception as error:
