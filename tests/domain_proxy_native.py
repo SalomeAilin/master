@@ -1,5 +1,6 @@
 """Native CLI log bounds, startup diagnostics and graceful process exit."""
 import json
+import importlib.util
 from pathlib import Path
 import socket
 import subprocess
@@ -15,11 +16,16 @@ def run(binary):
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
         config = root / "config.json"
-        config.write_text(json.dumps({
-            "log": {"level": "info", "timestamp": True},
-            "inbounds": [{"type": "mixed", "listen": "127.0.0.1", "listen_port": port}],
-            "outbounds": [{"type": "direct"}],
-        }))
+        repo = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("builder", repo / "scripts/build-domain-proxy.py")
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        candidate = builder.build_independent(repo / "config", root, root / "cache")
+        candidate["listen"] = f"127.0.0.1:{port}"
+        for source in candidate["rule_sources"]:
+            rule = {"ip_cidr": ["223.5.5.0/24"]} if source["kind"] == "china" else {"domain": ["fixture.test"]}
+            Path(source["seed"]).write_text(json.dumps({"version": 2, "rules": [rule]}))
+        config.write_text(json.dumps(candidate))
         log_path = root / "service.log"
         command = [binary, "run", "--disable-color", "--log-file", str(log_path),
                    "--log-max-size", "1024", "--log-max-backups", "3", "-c", str(config)]
@@ -29,7 +35,7 @@ def run(binary):
             while time.monotonic() < deadline:
                 if process.poll() is not None:
                     raise AssertionError(process.stderr.read().decode())
-                if log_path.exists() and " started (" in log_path.read_text():
+                if log_path.exists() and '"event":"started"' in log_path.read_text():
                     break
                 time.sleep(0.05)
             else:
@@ -54,12 +60,12 @@ def run(binary):
         for path in logs:
             assert path.stat().st_size <= 1024, path
             assert path.stat().st_mode & 0o777 == 0o600, path
-        assert any("outbound connection" in path.read_text() for path in logs), logs
+        assert any('"event":"rejected"' in path.read_text() for path in logs), logs
         print("PASS native process logs rotate within four private 1 KiB files and SIGTERM exits cleanly")
         config.write_text("{broken")
         result = subprocess.run(command, capture_output=True, timeout=5)
         assert result.returncode != 0, "Invalid configuration started"
-        assert "decode config" in log_path.read_text(), log_path.read_text()
+        assert '"event":"startup_failed"' in log_path.read_text(), log_path.read_text()
         assert log_path.stat().st_size <= 1024
         print("PASS startup configuration errors reach the same bounded native log")
 

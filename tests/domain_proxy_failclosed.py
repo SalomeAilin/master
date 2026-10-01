@@ -16,15 +16,12 @@ spec.loader.exec_module(builder)
 
 def run(binary, rules_directory=builder.RULES_DIRECTORY):
     with tempfile.TemporaryDirectory() as directory:
-        config = builder.build(ROOT / "config", rules_directory, Path(directory) / "cache.db")
+        config = builder.build_independent(ROOT / "config", rules_directory, Path(directory) / "cache")
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
-        config["inbounds"][0]["listen_port"] = port
-        config["outbounds"][0]["bind_interface"] = "en999"
-        config["dns"]["servers"][1]["bind_interface"] = "en999"
-        for rule_set in config["route"]["rule_set"]:
-            rule_set["http_client"]["bind_interface"] = "en999"
+        config["listen"] = f"127.0.0.1:{port}"
+        config["foreign"]["interface"] = "en999"
         path = Path(directory) / "config.json"
         path.write_text(json.dumps(config))
         with (Path(directory) / "output.log").open("w+") as output:

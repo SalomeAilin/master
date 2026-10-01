@@ -1,26 +1,27 @@
-"""Configuration regressions for connection-scoped domain routing."""
+"""Policy regressions for the independent, connection-scoped routing engine."""
 import importlib.util
+import ipaddress
 from pathlib import Path
 import unittest
-import ipaddress
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("builder", ROOT / "scripts" / "build-domain-proxy.py")
+spec = importlib.util.spec_from_file_location("builder", ROOT / "scripts/build-domain-proxy.py")
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
 
 class DomainProxyTests(unittest.TestCase):
     def setUp(self):
-        self.config = builder.build(ROOT / "config")
-        self.suffixes = self.config["route"]["rules"][1]["domain_suffix"]
+        self.config = builder.build_independent(ROOT / "config")
+        self.local = self.config["local_domestic"]
 
     def domestic(self, name):
-        return name in self.config["route"]["rules"][1]["domain"] or any(name == s or name.endswith("." + s) for s in self.suffixes)
+        return name in self.local["domain"] or any(name == s or name.endswith("." + s)
+                                                   for s in self.local["domain_suffix"])
 
     def test_media_and_foreign_cdn_keep_domain_classification(self):
         for name in ("v26-web-prime.douyinvod.com", "billing.console.aliyun.com",
-                     "player-gw-s.aliyuncs.com", "api.smoot.apple.cn", "alsay.net",
+                     "player-gw-s.aliyuncs.com", "api.smoot.apple.cn",
                      "vc-gate-edge.ndcpp.com", "lf-cdn-tos.bytescm.com"):
             self.assertTrue(self.domestic(name), name)
 
@@ -29,48 +30,37 @@ class DomainProxyTests(unittest.TestCase):
                      "other.ndcpp.com", "tiktok.com", "x.vc-gate-edge.ndcpp.com"):
             self.assertFalse(self.domestic(name), name)
 
-    def test_interface_pinning_and_no_fallback(self):
-        self.assertEqual(self.config["route"]["final"], "foreign-wifi")
-        routes = {o["tag"]: o for o in self.config["outbounds"]}
-        self.assertEqual(routes["foreign-wifi"]["bind_interface"], "en1")
-        self.assertEqual(routes["domestic-wired"]["bind_interface"], "en0")
-        self.assertTrue(all(o["type"] == "direct" for o in routes.values()))
-        self.assertEqual(self.config["inbounds"][0]["listen"], "127.0.0.1")
-        self.assertNotIn("set_system_proxy", self.config["inbounds"][0])
-        self.assertEqual(set(self.config["experimental"]), {"cache_file"})
+    def test_interfaces_are_separate_without_fallback(self):
+        self.assertEqual(self.config["foreign"]["interface"], "en1")
+        self.assertEqual(self.config["domestic"]["interface"], "en0")
+        self.assertEqual(self.config["listen"], "127.0.0.1:17890")
+        self.assertNotIn("fallback", self.config)
 
-    def test_known_foreign_precedes_unknown_ip_inference(self):
-        rules = self.config["route"]["rules"]
-        self.assertIn("github.com", rules[0]["domain_suffix"])
-        self.assertEqual(rules[2]["rule_set"], ["geosite-geolocation-!cn"])
-        self.assertEqual(rules[2]["outbound"], "foreign-wifi")
-        self.assertEqual(rules[4]["action"], "resolve")
-        self.assertEqual(rules[4]["server"], "domestic-dns")
-        self.assertEqual(rules[5], {"ip_is_private": True, "action": "reject"})
-        self.assertEqual(rules[6]["rule_set"], ["geoip-cn"])
-        networks = [ipaddress.ip_network(n) for n in rules[7]["ip_cidr"]]
+    def test_known_foreign_is_protected_from_ip_inference(self):
+        protected = self.config["protected_foreign"]["domain_suffix"]
+        for domain in ("github.com", "claude.ai", "tiktok.com", "google.com"):
+            self.assertIn(domain, protected)
+        networks = [ipaddress.ip_network(n) for n in self.config["china_cidr"]]
         self.assertTrue(any(ipaddress.ip_address("223.5.5.5") in n for n in networks))
         self.assertFalse(any(ipaddress.ip_address("1.1.1.1") in n for n in networks))
 
-    def test_updates_are_cached_and_pinned_without_new_daemon(self):
-        for rule_set in self.config["route"]["rule_set"]:
-            self.assertTrue(rule_set["url"].startswith("https://raw.githubusercontent.com/SagerNet/"))
-            self.assertEqual(rule_set["http_client"]["bind_interface"], "en1")
-            self.assertEqual(rule_set["update_interval"], "1h")
-            self.assertEqual(rule_set["http_client"]["domain_resolver"], "rules-bootstrap")
-            self.assertTrue(rule_set["initial_path"].startswith("/usr/local/etc/network-domain-rules/"))
-        self.assertTrue(self.config["experimental"]["cache_file"]["enabled"])
-        self.assertFalse(self.config["experimental"]["cache_file"]["store_dns"])
+    def test_json_rule_data_is_cached_without_an_engine_dependency(self):
+        self.assertEqual({s["kind"] for s in self.config["rule_sources"]}, {"domestic", "foreign", "china"})
+        for source in self.config["rule_sources"]:
+            self.assertTrue(source["url"].startswith("https://"))
+            self.assertTrue(source["url"].endswith(".json"))
+            self.assertEqual(source["interval"], "1h")
+            self.assertTrue(source["seed"].startswith(str(builder.RULES_DIRECTORY)))
+        self.assertEqual(self.config["cache_directory"], builder.CACHE_DIRECTORY)
+        self.assertNotIn("experimental", self.config)
+        self.assertNotIn("outbounds", self.config)
 
-    def test_dns_is_encrypted_and_independent_per_interface(self):
-        servers = {s["tag"]: s for s in self.config["dns"]["servers"]}
-        for tag, interface in (("domestic-dns", "en0"), ("foreign-dns", "en1")):
-            server = servers[tag]
-            self.assertEqual(server["type"], "https")
-            self.assertEqual(server["bind_interface"], interface)
-            self.assertTrue(server["tls"]["enabled"])
-            self.assertFalse(server["tls"].get("insecure", False))
-            ipaddress.ip_address(server["server"])
+    def test_doh_endpoints_are_literals_with_certificate_names(self):
+        for kind, address, name in (("domestic", "223.5.5.5", "dns.alidns.com"),
+                                    ("foreign", "1.1.1.1", "cloudflare-dns.com")):
+            dns = self.config[kind]["dns"]
+            self.assertEqual(dns, {"address": address, "server_name": name})
+            self.assertTrue(ipaddress.ip_address(dns["address"]).is_global)
 
 
 if __name__ == "__main__":

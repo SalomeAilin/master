@@ -35,6 +35,7 @@
 - 2026-09-25：在这台 Mac 的 zsh 里，`log` 是 shell 内置命令。查系统日志必须写 `/usr/bin/log show ...`。直接写 `log show` 会报 "too many arguments"，加了 `2>/dev/null` 就会静默返回空结果，曾因此误判为"没有日志记录"。
 - 2026-09-25：用户说的"复刻"指 GitHub Fork。sing-box 的 fork 在 `SalomeAilin/sing-box`。
 - 2026-10-01：`sing-box/` 是 squashed Git subtree，不是独立仓库。代理引擎以稳定 v1.14.2 为基础，加入原生有界日志后命名为 `network-domain-engine`，由 launchd 直接管理；旧 Python 代理外壳已退休。DNS 观察和 IP 路由守护仍是独立组件，不能把原生代理接管称为整套业务迁移完成。编译、验证与安装路径见 `README.md`。
+- 2026-10-02：独立代理源码在 `engine/`，版本 `0.1.0-independent`，只依赖 Go 标准库，不导入或执行 sing-box。用户已同意上线验收后清理旧核心，但本轮管理员验证未完成，安装未执行；不能把源码提交当作线上接管，旧核心须保留到真实验收通过。外部规则数据及 Go、macOS 的许可证和作者权利不因自研迁移而转移。
 - 2026-09-26：在 Claude 桌面 App 里运行第三方 Python（PATH 里排第一的 `/usr/local/bin/python3`）访问局域网地址（路由器、组播地址），会报 `[Errno 65] No route to host`。这是 macOS 的"本地网络"隐私权限在拦截，不是路由故障，不能据此判断路由器不通。同一个脚本改用 Apple 自带的 `/usr/bin/python3` 就能正常发送，`curl`、`nc`、`ping` 也不受影响。Codex 里是否一样还没验证过。
 - 2026-09-26：这台 Mac 的 zsh 5.9 里，`set -e` 在函数内部触发退出时，顶层的 `trap ... EXIT` 不会执行，只有在顶层失败时才会执行。靠 EXIT 陷阱清理临时文件的脚本，要再加一个 `trap ... ZERR`。在 `if` 条件里失败不会触发 ZERR，`$(...)` 里的也一样。清理函数里用 `(( ZSH_SUBSHELL == 0 ))` 判断，只在主 shell 执行清理，参见 `scripts/deploy-remote-access.zsh`。
 - sing-box 的许可证是 GPL-3.0-or-later，另附条款：衍生作品未经许可不得使用 sing-box 的名称。

@@ -1,9 +1,8 @@
-"""Exercise the actual engine with local DNS, rule updates and no external dials."""
+"""Isolated native classification, hot updates and last-good cache recovery."""
 import importlib.util
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import re
 import socket
 import subprocess
 import sys
@@ -12,7 +11,7 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("builder", ROOT / "scripts" / "build-domain-proxy.py")
+spec = importlib.util.spec_from_file_location("builder", ROOT / "scripts/build-domain-proxy.py")
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
@@ -23,14 +22,14 @@ def wait_for(predicate, timeout=6):
         if predicate():
             return
         time.sleep(0.05)
-    raise AssertionError("Timed out waiting for engine evidence")
+    raise AssertionError("Timed out waiting for independent engine evidence")
 
 
 def run(binary):
     contents = {
-        "geosite-geolocation-cn": {"version": 3, "rules": [{"domain": ["listed-cn.test"]}]},
-        "geosite-geolocation-!cn": {"version": 3, "rules": [{"domain": ["listed-foreign.test"]}]},
-        "geoip-cn": {"version": 3, "rules": [{"ip_cidr": ["223.5.5.0/24"]}]},
+        "domestic": {"version": 2, "rules": [{"domain": ["listed-cn.test"]}]},
+        "foreign": {"version": 2, "rules": [{"domain": ["listed-foreign.test"]}]},
+        "china": {"version": 2, "rules": [{"ip_cidr": ["223.5.5.0/24"]}]},
     }
 
     class Handler(BaseHTTPRequestHandler):
@@ -49,42 +48,27 @@ def run(binary):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with tempfile.TemporaryDirectory() as directory:
-            directory = Path(directory)
-            config = builder.build(ROOT / "config", directory, directory / "cache.db")
-            config["log"]["level"] = "debug"
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            config = builder.build_independent(ROOT / "config", directory, directory / "cache")
             with socket.socket() as reservation:
                 reservation.bind(("127.0.0.1", 0))
                 port = reservation.getsockname()[1]
-            config["inbounds"][0]["listen_port"] = port
-            # The unknown-IP test must use the remote GeoIP set, not the legacy list.
-            config["route"]["rules"].pop()
-            # Invalid interfaces expose the chosen outbound without sending traffic.
-            for outbound in config["outbounds"]:
-                outbound["bind_interface"] = "en999"
+            config["listen"] = f"127.0.0.1:{port}"
+            config["china_cidr"] = []
             names = {
-                "github.com": ["223.5.5.5"],
-                "www.douyin.com": ["1.1.1.1"],
-                "listed-cn.test": ["1.1.1.1"],
-                "listed-foreign.test": ["223.5.5.5"],
-                "unknown-cn.test": ["223.5.5.5"],
-                "unknown-foreign.test": ["1.1.1.1"],
-                "updated-cn.test": ["1.1.1.1"],
-                "private-rebind.test": ["127.0.0.1"],
+                "github.com": ["223.5.5.5"], "www.douyin.com": ["1.1.1.1"],
+                "listed-cn.test": ["1.1.1.1"], "listed-foreign.test": ["223.5.5.5"],
+                "unknown-cn.test": ["223.5.5.5"], "unknown-foreign.test": ["1.1.1.1"],
+                "updated-cn.test": ["1.1.1.1"], "private-rebind.test": ["127.0.0.1"],
             }
-            config["dns"]["servers"] = [
-                {"type": "hosts", "tag": tag, "predefined": names}
-                for tag in ("domestic-dns", "foreign-dns")
-            ]
-            for rule_set in config["route"]["rule_set"]:
-                tag = rule_set["tag"]
-                initial = directory / (tag + ".json")
-                initial.write_text(json.dumps(contents[tag]))
-                rule_set.update({
-                    "format": "source", "initial_path": str(initial),
-                    "url": f"http://127.0.0.1:{server.server_port}/{tag}",
-                    "http_client": {"bind_interface": "lo0"}, "update_interval": "500ms",
-                })
+            for kind, interface in (("domestic", "en998"), ("foreign", "en999")):
+                config[kind]["interface"] = interface
+                config[kind]["dns"] = {"address": "", "server_name": "", "hosts": names}
+            for source in config["rule_sources"]:
+                kind = source["kind"]
+                Path(source["seed"]).write_text(json.dumps(contents[kind]))
+                source.update(url=f"http://127.0.0.1:{server.server_port}/{kind}", interval="500ms")
             path = directory / "config.json"
             path.write_text(json.dumps(config))
             subprocess.run([binary, "check", "-c", str(path)], check=True)
@@ -92,55 +76,59 @@ def run(binary):
 
             def engine_checks(cached=False):
                 with log_path.open("w") as output:
-                    process = subprocess.Popen([binary, "run", "--disable-color", "-c", str(path)], stdout=output, stderr=output)
+                    process = subprocess.Popen([binary, "run", "-c", str(path)], stdout=output, stderr=output)
                     try:
-                        wait_for(lambda: "started" in log_path.read_text() or process.poll() is not None)
+                        wait_for(lambda: '"event":"started"' in log_path.read_text() or process.poll() is not None)
                         assert process.poll() is None, log_path.read_text()
 
-                        def request_lines(start, local_port):
-                            lines = log_path.read_text()[start:].splitlines()
-                            incoming = next((line for line in lines if
-                                             f"inbound connection from 127.0.0.1:{local_port}" in line), "")
-                            match = re.search(r"\[(\d+) ", incoming)
-                            return [line for line in lines if match and f"[{match[1]} " in line]
+                        def events(start, port):
+                            records = []
+                            for line in log_path.read_text()[start:].splitlines():
+                                try:
+                                    records.append(json.loads(line))
+                                except json.JSONDecodeError:
+                                    continue
+                            incoming = next((event for event in records if event.get("event") == "incoming"
+                                             and event.get("from") == f"127.0.0.1:{port}"), {})
+                            return [event for event in records if incoming and event.get("id") == incoming["id"]]
 
-                        def check(name, outbound):
+                        def check(name, kind):
                             start = len(log_path.read_text())
                             with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
-                                local_port = connection.getsockname()[1]
+                                local = connection.getsockname()[1]
                                 connection.sendall(f"CONNECT {name}:443 HTTP/1.1\r\nHost: {name}:443\r\n\r\n".encode())
-                                connection.recv(4096)
-                                expected = f"outbound/direct[{outbound}]: outbound connection to {name}:443"
-                                wait_for(lambda: any(expected in line for line in request_lines(start, local_port)))
-                            print("PASS", name, "->", outbound)
+                                response = connection.recv(4096)
+                                assert response.startswith(b"HTTP/1.1 502"), response
+                                wait_for(lambda: any(event.get("event") == "route" and
+                                                     event.get("outbound") == kind and
+                                                     event.get("target") == f"{name}:443"
+                                                     for event in events(start, local)))
+                            print("PASS", name, "->", kind)
 
-                        check("github.com", "foreign-wifi")
-                        check("www.douyin.com", "domestic-wired")
-                        check("listed-cn.test", "domestic-wired")
-                        check("listed-foreign.test", "foreign-wifi")
-                        check("unknown-cn.test", "domestic-wired")
-                        check("unknown-foreign.test", "foreign-wifi")
+                        for name, kind in (("github.com", "foreign"), ("www.douyin.com", "domestic"),
+                                           ("listed-cn.test", "domestic"), ("listed-foreign.test", "foreign"),
+                                           ("unknown-cn.test", "domestic"), ("unknown-foreign.test", "foreign")):
+                            check(name, kind)
                         start = len(log_path.read_text())
                         with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
-                            local_port = connection.getsockname()[1]
+                            local = connection.getsockname()[1]
                             connection.sendall(b"CONNECT private-rebind.test:443 HTTP/1.1\r\nHost: private-rebind.test:443\r\n\r\n")
                             connection.recv(4096)
-                            wait_for(lambda: any("reject" in line for line in request_lines(start, local_port)))
-                        # Earlier requests can still emit asynchronous connection errors.
-                        assert not any("outbound/direct" in line for line in request_lines(start, local_port))
-                        print("PASS unclassified private DNS answer is rejected")
+                            wait_for(lambda: any(event.get("event") == "rejected" for event in events(start, local)))
+                        assert not any(event.get("event") == "route" for event in events(start, local))
+                        print("PASS private DNS answer rejected before any outbound dial")
                         if not cached:
-                            check("updated-cn.test", "foreign-wifi")
-                            contents["geosite-geolocation-cn"]["rules"][0]["domain"].append("updated-cn.test")
+                            check("updated-cn.test", "foreign")
+                            contents["domestic"]["rules"][0]["domain"].append("updated-cn.test")
                             time.sleep(1.5)
-                            check("updated-cn.test", "domestic-wired")
-                            contents["geosite-geolocation-cn"] = b"corrupt-not-json"
-                            wait_for(lambda: "fetch rule-set geosite-geolocation-cn" in log_path.read_text())
-                            check("updated-cn.test", "domestic-wired")
-                            print("PASS live update changes new connections; corrupt update retains last good rules")
+                            check("updated-cn.test", "domestic")
+                            contents["domestic"] = b"corrupt-not-json"
+                            wait_for(lambda: "rule_update_failed" in log_path.read_text())
+                            check("updated-cn.test", "domestic")
+                            print("PASS hot update and corrupt-update last-good retention")
                         else:
-                            check("updated-cn.test", "domestic-wired")
-                            print("PASS restart with unreachable update server and no seed uses persistent cache")
+                            check("updated-cn.test", "domestic")
+                            print("PASS cached restart with update server and seeds unavailable")
                     except BaseException:
                         print(log_path.read_text())
                         raise
@@ -155,8 +143,8 @@ def run(binary):
             engine_checks()
             server.shutdown()
             server.server_close()
-            for rule_set in config["route"]["rule_set"]:
-                Path(rule_set["initial_path"]).unlink()
+            for source in config["rule_sources"]:
+                Path(source["seed"]).unlink()
             engine_checks(cached=True)
     finally:
         server.shutdown()

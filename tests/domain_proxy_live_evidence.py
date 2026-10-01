@@ -15,10 +15,10 @@ def connections(pid):
     return {line[1:] for line in result.stdout.splitlines() if line.startswith("n") and "->" in line}
 
 
-def probe(pid, host):
+def probe(pid, host, port=17890, log_path=Path("/var/log/network-domain-proxy/service.log")):
     before = connections(pid)
     started = time.monotonic()
-    with socket.create_connection(("127.0.0.1", 17890), timeout=10) as connection:
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
         local_port = connection.getsockname()[1]
         connection.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode())
         header = bytearray()
@@ -44,13 +44,24 @@ def probe(pid, host):
                 response.extend(part)
             status = bytes(response).split(b"\r\n", 1)[0].decode(errors="replace")
             elapsed = time.monotonic() - started
-    raw = Path("/var/log/network-domain-proxy/service.log").read_text()
+    raw = log_path.read_text()
     log = re.sub(r"\x1b\[[0-9;]*m", "", raw)
-    incoming = next((line for line in reversed(log.splitlines()) if
-                     f"inbound connection from 127.0.0.1:{local_port}" in line), "")
-    match = re.search(r"\[(\d+) ", incoming)
-    decisions = [line for line in log.splitlines() if match and
-                 f"[{match[1]} " in line and "outbound/direct[" in line]
+    events = []
+    for line in log.splitlines():
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # Historical logs predate the independent engine.
+    incoming_index = next((index for index in range(len(events) - 1, -1, -1)
+                           if events[index].get("event") == "incoming"
+                           and events[index].get("from") == f"127.0.0.1:{local_port}"), None)
+    incoming = events[incoming_index] if incoming_index is not None else {}
+    recent = events[incoming_index + 1:] if incoming_index is not None else []
+    decisions = [event for event in recent if incoming and event.get("id") == incoming["id"]
+                 and event.get("event") in ("route", "connected")]
+    exact = {event["source"] + "->" + event["destination"] for event in decisions
+             if event.get("event") == "connected"}
+    candidates = [candidate for candidate in candidates if candidate in exact]
     return {
         "host": host, "certificate_verified": True, "status": status,
         "seconds_to_response_headers_including_socket_inspection": round(elapsed, 3),
@@ -65,7 +76,7 @@ def main():
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     config = json.loads(Path("/usr/local/etc/network-domain-proxy.json").read_text())
-    pids = subprocess.check_output(["/usr/bin/pgrep", "-f", "^/usr/local/libexec/network-domain-sing-box run( |$)"], text=True).split()
+    pids = subprocess.check_output(["/usr/bin/pgrep", "-f", "^/usr/local/libexec/network-domain-engine run( |$)"], text=True).split()
     if len(pids) != 1:
         raise RuntimeError("Expected exactly one production proxy engine")
     report = {"time": datetime.datetime.now().astimezone().isoformat(), "engine_pid": int(pids[0]), "probes": []}
@@ -77,7 +88,7 @@ def main():
             if result["socket_attribution"] == "unique":
                 break
         report["probes"].append({"host": host, "attempts": attempts})
-    local = config["route"]["rules"][1]
+    local = config["local_domestic"]
     report["csdn_in_manual_overrides"] = "www.csdn.net" in local["domain"] or any(
         "www.csdn.net" == suffix or "www.csdn.net".endswith("." + suffix) for suffix in local["domain_suffix"])
     report["limitations"] = ["Short live sample, not a video playback test", "Concurrent browser connections can make socket attribution ambiguous"]

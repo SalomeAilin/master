@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Install separately from activation; restore the exact prior proxy settings."""
+"""Transactional installation of the independent, interface-bound proxy."""
 import argparse
 from contextlib import contextmanager
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
 import plistlib
+import pwd
 import shutil
 import socket
 import stat
@@ -17,21 +17,22 @@ import time
 
 STATE = Path("/var/db/network-domain-proxy.previous.json")
 LABEL = "system/com.local.network-domain-proxy"
-PLIST = "/Library/LaunchDaemons/com.local.network-domain-proxy.plist"
+PLIST = Path("/Library/LaunchDaemons/com.local.network-domain-proxy.plist")
 SERVICES = ("Wi-Fi", "Ethernet")
 KINDS = ("webproxy", "securewebproxy")
 CONFIG = Path("/usr/local/etc/network-domain-proxy.json")
-CACHE = Path("/var/db/network-domain-proxy/cache.db")
-RULES = Path("/usr/local/etc/network-domain-rules")
-BINARY = "/usr/local/libexec/network-domain-sing-box"
-LEGACY_RUNNER = Path("/usr/local/sbin/network-domain-proxy-run.py")
-LEGACY_RUNNER_SHA256 = "a7d519955bb8594ef1f91f9b1eb017faeffd76477d2053319c4d49539e95c1de"
+BINARY = Path("/usr/local/libexec/network-domain-engine")
+LEGACY_BINARY = Path("/usr/local/libexec/network-domain-sing-box")
+DEPLOY = Path("/usr/local/sbin/network-domain-proxy-deploy.py")
+RULES = Path("/usr/local/etc/network-domain-rules-independent")
+CACHE = Path("/var/db/network-domain-proxy/independent-cache")
+LOGDIR = Path("/var/log/network-domain-proxy")
+RULE_NAMES = ("domestic", "foreign", "china")
 DEPLOY_LOCK = Path("/var/db/network-domain-proxy.deploy.lock")
-RULE_NAMES = ("geosite-geolocation-cn", "geosite-geolocation-!cn", "geoip-cn")
 
 
 def run(*args):
-    return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT, timeout=30)
+    return subprocess.check_output(tuple(map(str, args)), text=True, stderr=subprocess.STDOUT, timeout=30)
 
 
 @contextmanager
@@ -49,7 +50,6 @@ def deployment_lock():
 
 
 def start_service():
-    # launchd can still be removing a booted-out job when bootstrap first runs.
     for attempt in range(10):
         try:
             return run("/bin/launchctl", "bootstrap", "system", PLIST)
@@ -64,15 +64,24 @@ def stop_service():
     pid = next((int(line.split("=", 1)[1]) for line in details.splitlines()
                 if line.strip().startswith("pid = ")), None)
     run("/bin/launchctl", "bootout", LABEL)
-    if pid is not None:
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                return
-            time.sleep(0.1)
-        raise RuntimeError("Service is still exiting; refusing to replace live files")
+    try:
+        if pid is not None:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return
+                time.sleep(0.1)
+            raise RuntimeError("Service is still exiting; live files were not replaced")
+    except BaseException:
+        # bootout already removed the job; retain its unchanged registration.
+        try:
+            start_service()
+        except BaseException as recovery_error:
+            raise RuntimeError("Service stop failed and registration recovery failed; "
+                               "live files remain unchanged") from recovery_error
+        raise
 
 
 def stop_candidate():
@@ -103,8 +112,8 @@ def restore(saved):
         for kind, values in kinds.items():
             if values["Server"] and int(values["Port"]) > 0:
                 run("/usr/sbin/networksetup", "-set" + kind, service, values["Server"], values["Port"])
-            enabled = "on" if values["Enabled"] == "Yes" else "off"
-            run("/usr/sbin/networksetup", "-set" + kind + "state", service, enabled)
+            run("/usr/sbin/networksetup", "-set" + kind + "state", service,
+                "on" if values["Enabled"] == "Yes" else "off")
 
 
 def install_file(source, target, mode):
@@ -122,172 +131,79 @@ def install_file(source, target, mode):
         Path(temporary).unlink(missing_ok=True)
 
 
-def prepare_automatic_data(root):
-    for name in RULE_NAMES:
-        run(BINARY, "rule-set", "decompile", str(root / (name + ".srs")), "-o", "/dev/null")
-    if RULES.exists():
-        if RULES.is_symlink() or RULES.stat().st_uid != 0 or RULES.stat().st_mode & 0o022:
-            raise RuntimeError("Unsafe rule seed directory")
-    else:
-        RULES.mkdir(mode=0o755)
-        RULES.chmod(0o755)
-    cache = Path("/var/db/network-domain-proxy")
-    if cache.is_symlink():
-        raise RuntimeError("Unsafe cache directory")
-    if not cache.exists():
-        cache.mkdir(mode=0o700)
-        shutil.chown(cache, user="nobody", group="wheel")
-    for name in RULE_NAMES:
-        install_file(root / (name + ".srs"), RULES / (name + ".srs"), 0o644)
+def arguments():
+    return [str(BINARY), "run", "--disable-color", "--log-file", str(LOGDIR / "service.log"),
+            "--log-max-size", "2097152", "--log-max-backups", "3", "-c", str(CONFIG)]
 
 
-def warm_rule_cache(root, directory):
+def validate_stage(root, migrating):
     config = json.loads((root / "config.json").read_text())
-    config["experimental"]["cache_file"]["path"] = str(directory / "cache.db")
-    # Synchronous initial downloads must complete before the candidate can listen.
-    for rule_set in config["route"]["rule_set"]:
-        rule_set.pop("initial_path", None)
-    with socket.socket() as reservation:
-        reservation.bind(("127.0.0.1", 0))
-        config["inbounds"][0]["listen_port"] = reservation.getsockname()[1]
-    path = directory / "candidate.json"
-    path.write_text(json.dumps(config))
-    shutil.chown(path, user="nobody", group="wheel")
-    for _ in range(3):
-        with (directory / "candidate.log").open("w+") as output:
-            process = subprocess.Popen([
-                "/usr/bin/sudo", "-u", "nobody", BINARY, "run", "--disable-color", "-c", str(path),
-            ], stdout=output, stderr=output)
-            try:
-                deadline = time.monotonic() + 25
-                while time.monotonic() < deadline and process.poll() is None:
-                    output.seek(0)
-                    if " started (" in output.read():
-                        print("All automatic rule sets cached before activation", flush=True)
-                        return directory / "cache.db"
-                    time.sleep(0.1)
-            finally:
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait()
-    raise RuntimeError("Rule cache preflight failed; live configuration was not changed")
+    if (config.get("version") != 1 or config.get("listen") != "127.0.0.1:17890"
+            or config.get("cache_directory") != str(CACHE)
+            or config.get("domestic", {}).get("interface") != "en0"
+            or config.get("foreign", {}).get("interface") != "en1"):
+        raise RuntimeError("Unexpected independent production configuration")
+    sources = config.get("rule_sources", [])
+    if ({s.get("kind") for s in sources} != set(RULE_NAMES) or len(sources) != 3 or
+            any(s.get("seed") != str(RULES / (s["kind"] + ".json")) or
+                s.get("interval") != "1h" or not s.get("url", "").startswith("https://")
+                for s in sources)):
+        raise RuntimeError("Unexpected independent rule source")
+    candidate = plistlib.loads((root / "com.local.network-domain-proxy.plist").read_bytes())
+    if (candidate.get("Label") != LABEL.removeprefix("system/") or
+            candidate.get("UserName") != "nobody" or candidate.get("ProgramArguments") != arguments()
+            or candidate.get("KeepAlive") is not True or candidate.get("RunAtLoad") is not True):
+        raise RuntimeError("Unexpected independent service definition")
+    if PLIST.exists():
+        previous = plistlib.loads(PLIST.read_bytes())
+        previous.pop("ProgramArguments", None)
+        unchanged = candidate.copy()
+        unchanged.pop("ProgramArguments", None)
+        if previous != unchanged:
+            raise RuntimeError("Service settings other than engine arguments would change")
+    if migrating:
+        previous = json.loads(CONFIG.read_text())
+        policies = previous["route"]["rules"]
+        local = {key: policies[1][key] for key in ("domain", "domain_suffix")}
+        protected = {"domain_suffix": policies[0]["domain_suffix"]}
+        if (config["local_domestic"] != local or config["protected_foreign"] != protected
+                or set(config["china_cidr"]) != set(policies[-1]["ip_cidr"])):
+            raise RuntimeError("Migration would change local routing policy")
+    return config
 
 
-def restore_automatic_backup(backup):
-    install_file(backup / "config.json", CONFIG, 0o644)
-    for name in RULE_NAMES:
-        previous = backup / "rules" / (name + ".srs")
-        if previous.exists():
-            install_file(previous, RULES / previous.name, 0o644)
-        else:
-            (RULES / previous.name).unlink(missing_ok=True)
-    if not (backup / "rules").exists() and RULES.exists():
-        RULES.rmdir()
-    if (backup / "cache.db").exists():
-        install_file(backup / "cache.db", CACHE, 0o600)
-        shutil.chown(CACHE, user="nobody", group="wheel")
-    else:
-        CACHE.unlink(missing_ok=True)
-
-
-def update_automatic(root):
-    run(BINARY, "check", "-c", str(root / "config.json"))
-    if RULES.is_symlink() or (RULES.exists() and
-            (RULES.stat().st_uid != 0 or RULES.stat().st_mode & 0o022)):
-        raise RuntimeError("Unsafe rule seed directory")
-    with tempfile.TemporaryDirectory(prefix="network-domain-preflight.", dir="/var/db") as temporary:
+def preflight(binary, config, root):
+    with tempfile.TemporaryDirectory(prefix="network-domain-independent-preflight.", dir="/var/db") as temporary:
         directory = Path(temporary)
         shutil.chown(directory, user="nobody", group="wheel")
-        warmed_cache = warm_rule_cache(root, directory)
-        for name in RULE_NAMES:
-            run(BINARY, "rule-set", "decompile", str(root / (name + ".srs")), "-o", "/dev/null")
-        backup = Path(tempfile.mkdtemp(prefix="network-domain-auto-backup.", dir="/var/db"))
-        try:
-            shutil.copy2(CONFIG, backup / "config.json")
-            if RULES.exists():
-                shutil.copytree(RULES, backup / "rules")
-        except BaseException:
-            shutil.rmtree(backup)
-            raise
-        stopped = False
-        files_changed = False
-        try:
-            stop_service()
-            stopped = True
-            # The engine owns the cache: snapshot it only after its writer stops.
-            if CACHE.exists():
-                shutil.copy2(CACHE, backup / "cache.db")
-            files_changed = True
-            prepare_automatic_data(root)
-            install_file(root / "config.json", CONFIG, 0o644)
-            install_file(warmed_cache, CACHE, 0o600)
-            shutil.chown(CACHE, user="nobody", group="wheel")
-            start_service()
-            time.sleep(2)
-            for url in ("https://www.douyin.com/", "https://github.com/"):
-                run("/usr/bin/curl", "--proxy", "http://127.0.0.1:17890", "--noproxy", "", "-fsS", "-o", "/dev/null", "--max-time", "15", url)
-            run("/bin/launchctl", "print", LABEL)
-        except BaseException:
-            if stopped:
-                try:
-                    if files_changed:
-                        # Never replace a cache that a running candidate can still write.
-                        stop_candidate()
-                        restore_automatic_backup(backup)
-                    start_service()
-                except BaseException:
-                    print("Rollback incomplete; recovery backup retained:", backup, flush=True)
-                    raise
-                if files_changed:
-                    print("Activation failed; previous proxy configuration and cache restored. Backup:", backup, flush=True)
-                else:
-                    shutil.rmtree(backup)
-                    print("Backup failed; live files unchanged and previous service restarted", flush=True)
-            else:
-                shutil.rmtree(backup)
-                print("Could not stop service; live files were not changed", flush=True)
-            raise
-    print("Automatic classification active; backup:", backup)
-
-
-def preflight_native(binary):
-    config = json.loads(CONFIG.read_text())
-    if config.get("log", {}).get("output"):
-        raise RuntimeError("Explicit log output would bypass native bounded logging")
-    run(str(binary), "check", "-c", str(CONFIG))
-    with tempfile.TemporaryDirectory(prefix="network-domain-native-preflight.", dir="/var/db") as temporary:
-        directory = Path(temporary)
-        shutil.chown(directory, user="nobody", group="wheel")
-        config["experimental"]["cache_file"]["path"] = str(directory / "cache.db")
+        candidate = json.loads(json.dumps(config))
+        candidate["cache_directory"] = str(directory / "cache")
+        for source in candidate["rule_sources"]:
+            source["seed"] = str(root / (source["kind"] + ".json"))
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
-        config["inbounds"][0]["listen_port"] = port
+        candidate["listen"] = f"127.0.0.1:{port}"
         path, log_path = directory / "config.json", directory / "service.log"
-        path.write_text(json.dumps(config))
+        path.write_text(json.dumps(candidate))
         shutil.chown(path, user="nobody", group="wheel")
+        run(binary, "check", "-c", path)
         with (directory / "startup.log").open("wb") as output:
             process = subprocess.Popen([
-                str(binary), "run", "--disable-color", "--log-file", str(log_path),
-                "--log-max-size", "2097152", "--log-max-backups", "3", "-c", str(path),
+                str(binary), "run", "--log-file", str(log_path), "-c", str(path),
             ], stdout=output, stderr=output, user="nobody", group="wheel", extra_groups=[],
                 env={key: value for key, value in os.environ.items()
                      if key not in ("SUDO_USER", "SUDO_UID", "SUDO_GID")})
             try:
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline and process.poll() is None:
-                    if log_path.exists() and " started (" in log_path.read_text():
+                    if log_path.exists() and any(json.loads(line).get("event") == "started"
+                                                 for line in log_path.read_text().splitlines()):
                         break
                     time.sleep(0.1)
                 else:
-                    raise RuntimeError("Native preflight did not start")
-                for url in ("https://www.douyin.com/", "https://github.com/"):
-                    run("/usr/bin/curl", "--proxy", f"http://127.0.0.1:{port}", "--noproxy", "",
-                        "-fsS", "-o", "/dev/null", "--max-time", "15", url)
+                    raise RuntimeError("Independent candidate did not start")
+                health(port)
             finally:
                 if process.poll() is None:
                     process.terminate()
@@ -298,130 +214,139 @@ def preflight_native(binary):
                     process.wait()
 
 
-def upgrade_native(root):
-    binary, plist = root / "network-domain-engine", root / "com.local.network-domain-proxy.plist"
-    arguments = [BINARY, "run", "--disable-color", "--log-file", "/var/log/network-domain-proxy/service.log",
-                 "--log-max-size", "2097152", "--log-max-backups", "3", "-c", str(CONFIG)]
-    candidate = plistlib.loads(plist.read_bytes())
-    if (candidate.get("Label") != LABEL.removeprefix("system/") or candidate.get("UserName") != "nobody"
-            or candidate.get("ProgramArguments") != arguments or not candidate.get("KeepAlive")):
-        raise RuntimeError("Unexpected native service definition")
-    if LEGACY_RUNNER.is_symlink() or (LEGACY_RUNNER.exists() and
-            hashlib.sha256(LEGACY_RUNNER.read_bytes()).hexdigest() != LEGACY_RUNNER_SHA256):
-        raise RuntimeError("Legacy runner differs from the reviewed version")
-    preflight_native(binary)
-    backup = Path(tempfile.mkdtemp(prefix="network-domain-native-backup.", dir="/var/db"))
+def health(port=17890):
+    for url in ("https://www.douyin.com/", "https://github.com/"):
+        run("/usr/bin/curl", "--proxy", f"http://127.0.0.1:{port}", "--noproxy", "",
+            "-fsS", "-o", "/dev/null", "--max-time", "15", url)
+
+
+def snapshot(backup, targets):
+    records = []
+    for index, target in enumerate(targets):
+        target = Path(target)
+        record = {"target": str(target), "present": target.exists(), "copy": str(index)}
+        if target.is_symlink():
+            raise RuntimeError("Refusing to snapshot a symlink")
+        if record["present"]:
+            info = target.stat()
+            if not stat.S_ISREG(info.st_mode):
+                raise RuntimeError("Refusing to snapshot a non-file")
+            shutil.copy2(target, backup / str(index))
+            record.update(mode=stat.S_IMODE(info.st_mode), uid=info.st_uid, gid=info.st_gid)
+        records.append(record)
+    (backup / "manifest.json").write_text(json.dumps(records))
+    return records
+
+
+def restore_snapshot(backup, records):
+    for record in records:
+        target = Path(record["target"])
+        if record["present"]:
+            install_file(backup / record["copy"], target, record["mode"])
+            os.chown(target, record["uid"], record["gid"])
+        else:
+            target.unlink(missing_ok=True)
+
+
+def ensure_directory(path, mode, user):
+    if path.is_symlink():
+        raise RuntimeError("Refusing a symlink directory")
+    if not path.exists():
+        path.mkdir(mode=mode)
+        path.chmod(mode)
+        shutil.chown(path, user=user, group="wheel")
+    info = path.stat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != pwd.getpwnam(user).pw_uid
+            or info.st_mode & (0o077 if mode == 0o700 else 0o022)):
+        raise RuntimeError("Unsafe installed directory")
+
+
+def upgrade(root, fresh=False):
+    if fresh and PLIST.exists():
+        raise RuntimeError("Service already installed")
+    details = "" if fresh else run("/bin/launchctl", "print", LABEL)
+    current = next((line.split("=", 1)[1].strip() for line in details.splitlines()
+                    if line.strip().startswith("program = ")), "")
+    if not fresh and current not in (str(BINARY), str(LEGACY_BINARY)):
+        raise RuntimeError("Unexpected active proxy program")
+    config = validate_stage(root, current == str(LEGACY_BINARY))
+    binary = root / "network-domain-engine"
+    preflight(binary, config, root)
+    targets = [BINARY, CONFIG, PLIST, DEPLOY]
+    targets += [RULES / (name + ".json") for name in RULE_NAMES]
+    targets += [CACHE / (name + ".json") for name in RULE_NAMES]
+    backup = Path(tempfile.mkdtemp(prefix="network-domain-independent-backup.", dir="/var/db"))
+    records = None
+    stopped, changed = fresh, False
+    directories = [path for path in (RULES, CACHE, LOGDIR) if not path.exists()]
     try:
-        for source, name in ((Path(BINARY), "binary"), (Path(PLIST), "service.plist"), (CONFIG, "config.json")):
-            shutil.copy2(source, backup / name)
-        if LEGACY_RUNNER.exists():
-            shutil.copy2(LEGACY_RUNNER, backup / "runner.py")
-    except BaseException:
-        shutil.rmtree(backup)
-        raise
-    stopped = False
-    changed = False
-    try:
-        stop_service()
-        stopped = True
-        if CACHE.exists():
-            shutil.copy2(CACHE, backup / "cache.db")
+        # Cache snapshots are taken only after the previous writer has exited.
+        if not fresh:
+            stop_service()
+            stopped = True
+        records = snapshot(backup, targets)
         changed = True
+        ensure_directory(RULES, 0o755, "root")
+        ensure_directory(CACHE, 0o700, "nobody")
+        ensure_directory(LOGDIR, 0o700, "nobody")
+        for name in RULE_NAMES:
+            install_file(root / (name + ".json"), RULES / (name + ".json"), 0o644)
         install_file(binary, BINARY, 0o755)
-        install_file(plist, PLIST, 0o644)
+        install_file(root / "config.json", CONFIG, 0o644)
+        install_file(root / "com.local.network-domain-proxy.plist", PLIST, 0o644)
+        install_file(root / "deploy-domain-proxy.py", DEPLOY, 0o755)
         start_service()
-        time.sleep(1)
-        for url in ("https://www.douyin.com/", "https://github.com/"):
-            run("/usr/bin/curl", "--proxy", "http://127.0.0.1:17890", "--noproxy", "",
-                "-fsS", "-o", "/dev/null", "--max-time", "15", url)
+        health()
         details = run("/bin/launchctl", "print", LABEL)
         if f"program = {BINARY}" not in details or "state = running" not in details:
-            raise RuntimeError("launchd is not running the native engine directly")
-        LEGACY_RUNNER.unlink(missing_ok=True)
+            raise RuntimeError("launchd is not running the independent engine")
     except BaseException:
         if stopped:
             try:
                 if changed:
                     stop_candidate()
-                    install_file(backup / "binary", BINARY, 0o755)
-                    install_file(backup / "service.plist", PLIST, 0o644)
-                    install_file(backup / "config.json", CONFIG, 0o644)
-                    if (backup / "runner.py").exists():
-                        install_file(backup / "runner.py", LEGACY_RUNNER, 0o755)
-                    if (backup / "cache.db").exists():
-                        install_file(backup / "cache.db", CACHE, 0o600)
-                        shutil.chown(CACHE, user="nobody", group="wheel")
-                    else:
-                        CACHE.unlink(missing_ok=True)
-                start_service()
+                    restore_snapshot(backup, records)
+                    for directory in reversed(directories):
+                        if directory.exists():
+                            directory.rmdir()
+                if not fresh:
+                    start_service()
             except BaseException:
-                print("Native rollback incomplete; recovery backup retained:", backup, flush=True)
+                print("Rollback incomplete; recovery backup retained:", backup, flush=True)
                 raise
         shutil.rmtree(backup)
         raise
-    print("Native engine active; legacy runner removed. Acceptance backup:", backup, flush=True)
+    print("Independent engine active. Acceptance backup:", backup, flush=True)
     return backup
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("install", "enable", "rollback", "update-auto", "upgrade-native"))
+    parser.add_argument("action", choices=("install", "upgrade", "enable", "rollback"))
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit("Administrator authorization required")
     os.umask(0o077)
     root = Path(__file__).resolve().parent
     with deployment_lock():
-        apply_action(args.action, root)
-
-
-def apply_action(action, root):
-    if action == "upgrade-native":
-        upgrade_native(root)
-    elif action == "update-auto":
-        update_automatic(root)
-    elif action == "install":
-        if Path(PLIST).exists():
-            raise RuntimeError("Service already installed; refusing implicit replacement")
-        binary = root / "network-domain-engine"
-        run(str(binary), "check", "-c", str(root / "config.json"))
-        libexec = Path("/usr/local/libexec")
-        if not libexec.exists():
-            libexec.mkdir(mode=0o755)
-            libexec.chmod(0o755)
-        install_file(binary, "/usr/local/libexec/network-domain-sing-box", 0o755)
-        prepare_automatic_data(root)
-        with tempfile.TemporaryDirectory(prefix="network-domain-preflight.", dir="/var/db") as temporary:
-            directory = Path(temporary)
-            shutil.chown(directory, user="nobody", group="wheel")
-            install_file(warm_rule_cache(root, directory), CACHE, 0o600)
-            shutil.chown(CACHE, user="nobody", group="wheel")
-        install_file(root / "config.json", "/usr/local/etc/network-domain-proxy.json", 0o644)
-        install_file(root / "com.local.network-domain-proxy.plist", PLIST, 0o644)
-        logdir = Path("/var/log/network-domain-proxy")
-        logdir.mkdir(mode=0o700)
-        shutil.chown(logdir, user="nobody", group="wheel")
-        start_service()
-        print("Service installed; system proxy settings unchanged")
-    elif action == "enable":
-        run("/bin/launchctl", "print", LABEL)
-        for url in ("https://www.douyin.com/", "https://github.com/"):
-            run("/usr/bin/curl", "--proxy", "http://127.0.0.1:17890", "--noproxy", "", "-f", "-sS", "-o", "/dev/null", "--max-time", "15", url)
-        saved = settings()
-        with STATE.open("x") as output:
-            json.dump(saved, output, indent=2)
-        try:
-            for service in SERVICES:
-                for kind in KINDS:
-                    run("/usr/sbin/networksetup", "-set" + kind, service, "127.0.0.1", "17890")
-                    run("/usr/sbin/networksetup", "-set" + kind + "state", service, "on")
-            print(json.dumps(settings(), indent=2))
-        except BaseException:
-            restore(saved)
-            raise
-    else:
-        restore(json.loads(STATE.read_text()))
-        print("Prior HTTP/HTTPS proxy settings restored; bypass lists untouched")
+        if args.action in ("install", "upgrade"):
+            upgrade(root, fresh=args.action == "install")
+        elif args.action == "enable":
+            health()
+            saved = settings()
+            with STATE.open("x") as output:
+                json.dump(saved, output, indent=2)
+            try:
+                for service in SERVICES:
+                    for kind in KINDS:
+                        run("/usr/sbin/networksetup", "-set" + kind, service, "127.0.0.1", "17890")
+                        run("/usr/sbin/networksetup", "-set" + kind + "state", service, "on")
+            except BaseException:
+                restore(saved)
+                raise
+        else:
+            restore(json.loads(STATE.read_text()))
+            print("Prior HTTP/HTTPS proxy settings restored; bypass lists untouched")
 
 
 if __name__ == "__main__":

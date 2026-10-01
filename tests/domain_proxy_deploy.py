@@ -1,7 +1,7 @@
 """Activation rollback checks without changing system services or files."""
 import importlib.util
 import hashlib
-from contextlib import nullcontext
+from contextlib import ExitStack
 from pathlib import Path
 import plistlib
 import shutil
@@ -76,37 +76,30 @@ class DeploymentTests(unittest.TestCase):
                     with self.assertRaises(deploy.subprocess.CalledProcessError):
                         deploy.stop_candidate()
 
-    def test_backup_restores_rules_and_removes_only_new_known_seeds(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            backup, rules = root / "backup", root / "rules"
-            (backup / "rules").mkdir(parents=True)
-            rules.mkdir()
-            (backup / "config.json").write_text("old config")
-            (backup / "cache.db").write_text("old cache")
-            (backup / "rules" / (deploy.RULE_NAMES[0] + ".srs")).write_text("old rule")
-            for name in deploy.RULE_NAMES:
-                (rules / (name + ".srs")).write_text("new rule")
-            (rules / "unrelated").write_text("keep")
-            with patch.object(deploy, "CONFIG", root / "active.json"), \
-                    patch.object(deploy, "CACHE", root / "active.db"), \
-                    patch.object(deploy, "RULES", rules), \
-                    patch.object(deploy.shutil, "chown"), \
-                    patch.object(deploy, "install_file", side_effect=lambda s, d, m: shutil.copyfile(s, d)):
-                deploy.restore_automatic_backup(backup)
-            self.assertEqual((root / "active.json").read_text(), "old config")
-            self.assertEqual((root / "active.db").read_text(), "old cache")
-            self.assertEqual((rules / (deploy.RULE_NAMES[0] + ".srs")).read_text(), "old rule")
-            self.assertEqual((rules / "unrelated").read_text(), "keep")
-            self.assertEqual(len(list(rules.iterdir())), 2)
-
     def test_stop_timeout_is_bounded_and_never_kills_arbitrary_process(self):
         with patch.object(deploy, "run", side_effect=["pid = 123\n", ""]), \
                 patch.object(deploy.time, "monotonic", side_effect=[0, 16]), \
-                patch.object(deploy.os, "kill") as kill:
+                patch.object(deploy.os, "kill") as kill, \
+                patch.object(deploy, "start_service") as restart:
             with self.assertRaisesRegex(RuntimeError, "still exiting"):
                 deploy.stop_service()
             kill.assert_not_called()
+            restart.assert_called_once_with()
+
+    def test_bootout_failure_does_not_duplicate_service(self):
+        error = deploy.subprocess.CalledProcessError(5, ["launchctl", "bootout"])
+        with patch.object(deploy, "run", side_effect=["pid = 123\n", error]), \
+                patch.object(deploy, "start_service") as restart:
+            with self.assertRaises(deploy.subprocess.CalledProcessError):
+                deploy.stop_service()
+            restart.assert_not_called()
+
+    def test_stop_timeout_reports_registration_recovery_failure(self):
+        with patch.object(deploy, "run", side_effect=["pid = 123\n", ""]), \
+                patch.object(deploy.time, "monotonic", side_effect=[0, 16]), \
+                patch.object(deploy, "start_service", side_effect=RuntimeError("bootstrap failure")):
+            with self.assertRaisesRegex(RuntimeError, "registration recovery failed"):
+                deploy.stop_service()
 
     def test_launchd_unload_race_is_retried(self):
         error = deploy.subprocess.CalledProcessError(5, ["launchctl", "bootstrap"])
@@ -115,195 +108,148 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(deploy.start_service(), "started")
             self.assertEqual(command.call_count, 2)
 
-    def exercise(self, fail, existing_cache=False, failed_stop=False, failed_preflight=False, failed_cache_copy=False):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = root / "active.json"
-            config.write_text("old")
-            (root / "config.json").write_text("new")
-            backup = root / "backup"
-            backup.mkdir()
-            warmed = root / "warmed-cache.db"
-            warmed.write_bytes(b"fixture")
-            cache = root / "runtime-cache.db"
-            if existing_cache:
-                cache.write_bytes(b"old cache")
-            original_copy = shutil.copy2
 
-            def copy(source, target):
-                if source == cache and failed_cache_copy:
-                    raise OSError("simulated cache backup failure")
-                return original_copy(source, target)
-
-            def run(*args):
-                if fail and args[0] == "/usr/bin/curl":
-                    raise RuntimeError("simulated activation probe failure")
-                return ""
-
-            with patch.object(deploy, "CONFIG", config), \
-                    patch.object(deploy, "CACHE", cache), \
-                    patch.object(deploy, "RULES", root / "absent-rules"), \
-                    patch.object(deploy, "prepare_automatic_data"), \
-                    patch.object(deploy, "warm_rule_cache", return_value=warmed,
-                                 side_effect=RuntimeError("simulated preflight") if failed_preflight else None), \
-                    patch.object(deploy, "stop_service", side_effect=RuntimeError("simulated stop") if failed_stop else None) as stop, \
-                    patch.object(deploy, "stop_candidate") as stop_candidate, \
-                    patch.object(deploy.tempfile, "TemporaryDirectory", return_value=nullcontext(str(root))), \
-                    patch.object(deploy.tempfile, "mkdtemp", return_value=str(backup)), \
-                    patch.object(deploy.shutil, "chown"), \
-                    patch.object(deploy.shutil, "copy2", side_effect=copy), \
-                    patch.object(deploy.subprocess, "run"), \
-                    patch.object(deploy.time, "sleep"), \
-                    patch.object(deploy, "install_file", side_effect=lambda src, dst, mode: shutil.copyfile(src, dst)), \
-                    patch.object(deploy, "run", side_effect=run) as commands:
-                if fail or failed_stop or failed_preflight or failed_cache_copy:
-                    with self.assertRaisesRegex((RuntimeError, OSError), "simulated"):
-                        deploy.update_automatic(root)
-                else:
-                    deploy.update_automatic(root)
-                unchanged = fail or failed_stop or failed_preflight or failed_cache_copy
-                self.assertEqual(config.read_text(), "old" if unchanged else "new")
-                if failed_preflight:
-                    stop.assert_not_called()
-                    self.assertFalse((backup / "config.json").exists())
-                    return
-                if failed_stop:
-                    self.assertFalse(backup.exists())
-                    return
-                if failed_cache_copy:
-                    self.assertFalse(backup.exists())
-                else:
-                    self.assertEqual((backup / "config.json").read_text(), "old")
-                if unchanged:
-                    if existing_cache:
-                        self.assertEqual(cache.read_bytes(), b"old cache")
-                    else:
-                        self.assertFalse(cache.exists())
-                else:
-                    self.assertEqual(cache.read_bytes(), b"fixture")
-                self.assertFalse(any(c.args[0] == "/usr/sbin/networksetup" for c in commands.call_args_list))
-                restarts = [c for c in commands.call_args_list if "bootstrap" in c.args]
-                self.assertEqual(len(restarts), 2 if fail and not failed_cache_copy else 1)
-                self.assertEqual(stop_candidate.call_count, 1 if fail and not failed_cache_copy else 0)
-
-    def test_failed_activation_restores_previous_config(self):
-        self.exercise(True)
-
-    def test_success_preserves_backup_and_system_proxy_settings(self):
-        self.exercise(False)
-
-    def test_failed_activation_restores_old_cache_not_new_rule_decisions(self):
-        self.exercise(True, existing_cache=True)
-
-    def test_stop_failure_never_overwrites_live_files(self):
-        self.exercise(False, existing_cache=True, failed_stop=True)
-
-    def test_preflight_failure_leaves_no_backup_or_restart(self):
-        self.exercise(False, existing_cache=True, failed_preflight=True)
-
-    def test_cache_backup_failure_keeps_old_cache_and_restarts_old_service(self):
-        self.exercise(False, existing_cache=True, failed_cache_copy=True)
-
-
-class NativeDeploymentTests(unittest.TestCase):
-    def exercise(self, failure=None, existing_cache=True):
+class IndependentDeploymentTests(unittest.TestCase):
+    def exercise(self, failure=None, already_independent=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            binary, plist, config, cache, runner = (root / name for name in
-                                                    ("active-binary", "active.plist", "active.json", "cache.db", "runner.py"))
-            binary.write_bytes(b"old binary")
+            binary, legacy, plist, config, installer = (root / name for name in
+                ("active-binary", "legacy-binary", "active.plist", "active.json", "active-installer.py"))
+            rules, cache, logs = (root / name for name in ("rules", "cache", "logs"))
+            for directory in (rules, cache, logs):
+                directory.mkdir(mode=0o700)
+            legacy.write_bytes(b"legacy binary")
+            if already_independent:
+                binary.write_bytes(b"old independent binary")
             plist.write_bytes(b"old plist")
-            config.write_text("unchanged config")
-            runner.write_bytes(b"old runner")
-            if existing_cache:
-                cache.write_bytes(b"old cache")
-            (root / "network-domain-engine").write_bytes(b"native binary")
-            definition = {"Label": deploy.LABEL.removeprefix("system/"), "UserName": "nobody", "KeepAlive": True,
-                          "ProgramArguments": [str(binary), "run", "--disable-color", "--log-file",
-                                               "/var/log/network-domain-proxy/service.log", "--log-max-size", "2097152",
-                                               "--log-max-backups", "3", "-c", str(config)]}
-            (root / "com.local.network-domain-proxy.plist").write_bytes(plistlib.dumps(definition))
-            events = []
+            config.write_text("old config")
+            installer.write_bytes(b"old installer")
+            for name in deploy.RULE_NAMES:
+                (rules / (name + ".json")).write_bytes(b"old seed")
+                (cache / (name + ".json")).write_bytes(b"old cache")
+                (root / (name + ".json")).write_bytes(b"new seed")
+            for name, data in (("network-domain-engine", b"new binary"),
+                               ("com.local.network-domain-proxy.plist", b"new plist"),
+                               ("config.json", b"new config"), ("deploy-domain-proxy.py", b"new installer")):
+                (root / name).write_bytes(data)
+            old_program = binary if already_independent else legacy
             make_temporary = tempfile.mkdtemp
+            original_snapshot = deploy.snapshot
+            original_restore = deploy.restore_snapshot
+            original_values = {str(p): p.read_bytes() for p in (plist, config, installer)}
+            if already_independent:
+                original_values[str(binary)] = binary.read_bytes()
 
-            def preflight(candidate):
-                events.append("preflight")
+            def preflight(*args):
                 if failure == "preflight":
                     raise RuntimeError("simulated preflight failure")
 
-            def stop():
-                events.append("stop")
-                if failure == "stop":
-                    raise RuntimeError("simulated stop failure")
-
-            def install(source, target, mode):
-                if failure == "rollback" and Path(source).name == "binary":
-                    raise RuntimeError("simulated rollback failure")
-                shutil.copyfile(source, target)
-
             def command(*args):
                 if args[0] == "/usr/bin/curl" and failure in ("activation", "rollback"):
-                    cache.write_bytes(b"candidate cache")
+                    (cache / "domestic.json").write_bytes(b"candidate cache")
                     raise RuntimeError("simulated activation failure")
-                return f"program = {binary}\nstate = running\n"
+                return f"program = {old_program if command.calls == 0 else binary}\nstate = running\n"
+            command.calls = 0
 
-            with patch.object(deploy, "BINARY", str(binary)), patch.object(deploy, "PLIST", str(plist)), \
-                    patch.object(deploy, "CONFIG", config), patch.object(deploy, "CACHE", cache), \
-                    patch.object(deploy, "LEGACY_RUNNER", runner), \
-                    patch.object(deploy, "LEGACY_RUNNER_SHA256", hashlib.sha256(b"old runner").hexdigest()), \
-                    patch.object(deploy, "preflight_native", side_effect=preflight), \
-                    patch.object(deploy, "stop_service", side_effect=stop), \
-                    patch.object(deploy, "stop_candidate") as stop_candidate, \
-                    patch.object(deploy, "start_service") as start, \
-                    patch.object(deploy, "run", side_effect=command) as run, \
-                    patch.object(deploy, "install_file", side_effect=install), \
-                    patch.object(deploy.shutil, "chown"), patch.object(deploy.time, "sleep"), \
-                    patch.object(deploy.tempfile, "mkdtemp", side_effect=lambda **kw: make_temporary(dir=root)):
+            def run(*args):
+                result = command(*args)
+                command.calls += 1
+                return result
+
+            def snapshot(*args):
+                if failure == "snapshot":
+                    raise RuntimeError("simulated snapshot failure")
+                return original_snapshot(*args)
+
+            def restore(*args):
+                if failure == "rollback":
+                    raise RuntimeError("simulated rollback failure")
+                return original_restore(*args)
+
+            with ExitStack() as stack:
+                for name, value in {"BINARY": binary, "LEGACY_BINARY": legacy, "PLIST": plist,
+                                    "CONFIG": config, "DEPLOY": installer, "RULES": rules,
+                                    "CACHE": cache, "LOGDIR": logs}.items():
+                    stack.enter_context(patch.object(deploy, name, value))
+                stack.enter_context(patch.object(deploy, "validate_stage", return_value={}))
+                stack.enter_context(patch.object(deploy, "preflight", side_effect=preflight))
+                stack.enter_context(patch.object(deploy, "snapshot", side_effect=snapshot))
+                stack.enter_context(patch.object(deploy, "restore_snapshot", side_effect=restore))
+                stack.enter_context(patch.object(deploy, "ensure_directory"))
+                stack.enter_context(patch.object(deploy.os, "fchown"))
+                stack.enter_context(patch.object(deploy.os, "chown"))
+                stop = stack.enter_context(patch.object(deploy, "stop_service",
+                    side_effect=RuntimeError("simulated stop failure") if failure == "stop" else None))
+                stop_candidate = stack.enter_context(patch.object(deploy, "stop_candidate"))
+                start = stack.enter_context(patch.object(deploy, "start_service"))
+                commands = stack.enter_context(patch.object(deploy, "run", side_effect=run))
+                stack.enter_context(patch.object(deploy.tempfile, "mkdtemp",
+                    side_effect=lambda **kw: make_temporary(dir=root)))
                 if failure:
                     with self.assertRaisesRegex(RuntimeError, "simulated"):
-                        deploy.upgrade_native(root)
+                        deploy.upgrade(root)
                 else:
-                    backup = deploy.upgrade_native(root)
-                    self.assertEqual((backup / "binary").read_bytes(), b"old binary")
-                    self.assertEqual(binary.read_bytes(), b"native binary")
-                    self.assertFalse(runner.exists())
-                self.assertEqual(config.read_text(), "unchanged config")
-                self.assertFalse(any(c.args[0] == "/usr/sbin/networksetup" for c in run.call_args_list))
-                backups = [path for path in root.iterdir() if path.is_dir()]
-                if failure != "rollback":
-                    self.assertEqual(len(backups), 0 if failure else 1)
-                    if failure:
-                        self.assertEqual(binary.read_bytes(), b"old binary")
-                        self.assertEqual(plist.read_bytes(), b"old plist")
-                        self.assertEqual(runner.read_bytes(), b"old runner")
-                    if existing_cache:
-                        self.assertEqual(cache.read_bytes(), b"old cache")
-                    else:
-                        self.assertFalse(cache.exists())
-                else:
-                    self.assertEqual(len(backups), 1)
-                self.assertEqual(events, ["preflight"] if failure == "preflight" else ["preflight", "stop"])
-                self.assertEqual(start.call_count, 0 if failure in ("stop", "preflight") else
-                                 1 if not failure or failure == "rollback" else 2)
+                    backup = deploy.upgrade(root)
+                    self.assertTrue((backup / "manifest.json").exists())
+                    self.assertEqual(binary.read_bytes(), b"new binary")
+                    self.assertEqual(config.read_bytes(), b"new config")
+                    self.assertEqual(installer.read_bytes(), b"new installer")
+                self.assertEqual(legacy.read_bytes(), b"legacy binary")
+                self.assertFalse(any(c.args[0] == "/usr/sbin/networksetup" for c in commands.call_args_list))
+                backups = [p for p in root.iterdir() if p.is_dir() and p not in (rules, cache, logs)]
+                self.assertEqual(len(backups), 1 if not failure or failure == "rollback" else 0)
+                if failure and failure != "rollback":
+                    for path, value in original_values.items():
+                        self.assertEqual(Path(path).read_bytes(), value)
+                    if not already_independent:
+                        self.assertFalse(binary.exists())
+                    for name in deploy.RULE_NAMES:
+                        self.assertEqual((rules / (name + ".json")).read_bytes(), b"old seed")
+                        self.assertEqual((cache / (name + ".json")).read_bytes(), b"old cache")
+                self.assertEqual(start.call_count, 0 if failure in ("preflight", "stop") else
+                                 2 if failure == "activation" else 1)
+                self.assertEqual(stop.call_count, 0 if failure == "preflight" else 1)
                 self.assertEqual(stop_candidate.call_count, 1 if failure in ("activation", "rollback") else 0)
 
-    def test_native_activation_removes_only_reviewed_runner(self):
+    def test_migration_success_keeps_old_binary_until_socket_acceptance(self):
         self.exercise()
 
-    def test_native_activation_failure_restores_binary_service_runner_and_cache(self):
-        self.exercise("activation")
-
-    def test_native_rollback_removes_only_new_cache_when_previously_absent(self):
-        self.exercise("activation", existing_cache=False)
-
-    def test_native_preflight_failure_leaves_live_files_untouched(self):
+    def test_preflight_failure_does_not_stop_or_write(self):
         self.exercise("preflight")
 
-    def test_native_stop_failure_does_not_publish_candidate(self):
+    def test_stop_failure_does_not_replace_files(self):
         self.exercise("stop")
 
-    def test_native_rollback_failure_retains_recovery_backup(self):
+    def test_snapshot_failure_restarts_unchanged_service(self):
+        self.exercise("snapshot")
+
+    def test_activation_failure_restores_files_and_cache(self):
+        self.exercise("activation")
+
+    def test_independent_upgrade_rolls_back_existing_binary(self):
+        self.exercise("activation", already_independent=True)
+
+    def test_rollback_failure_retains_private_backup(self):
         self.exercise("rollback")
+
+    def test_stage_rejects_wrong_interface_before_preflight(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "config.json").write_text('{"version":1,"listen":"0.0.0.0:17890"}')
+            with self.assertRaisesRegex(RuntimeError, "configuration"):
+                deploy.validate_stage(root, False)
+
+    def test_snapshot_refuses_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original = root / "original"
+            original.write_bytes(b"unchanged")
+            link = root / "link"
+            link.symlink_to(original)
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                deploy.snapshot(root, [link])
+            self.assertEqual(original.read_bytes(), b"unchanged")
+
 
 if __name__ == "__main__":
     unittest.main()
