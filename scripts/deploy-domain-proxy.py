@@ -3,9 +3,11 @@
 import argparse
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import socket
 import stat
@@ -22,6 +24,8 @@ CONFIG = Path("/usr/local/etc/network-domain-proxy.json")
 CACHE = Path("/var/db/network-domain-proxy/cache.db")
 RULES = Path("/usr/local/etc/network-domain-rules")
 BINARY = "/usr/local/libexec/network-domain-sing-box"
+LEGACY_RUNNER = Path("/usr/local/sbin/network-domain-proxy-run.py")
+LEGACY_RUNNER_SHA256 = "a7d519955bb8594ef1f91f9b1eb017faeffd76477d2053319c4d49539e95c1de"
 DEPLOY_LOCK = Path("/var/db/network-domain-proxy.deploy.lock")
 RULE_NAMES = ("geosite-geolocation-cn", "geosite-geolocation-!cn", "geoip-cn")
 
@@ -158,7 +162,7 @@ def warm_rule_cache(root, directory):
                 deadline = time.monotonic() + 25
                 while time.monotonic() < deadline and process.poll() is None:
                     output.seek(0)
-                    if "sing-box started" in output.read():
+                    if " started (" in output.read():
                         print("All automatic rule sets cached before activation", flush=True)
                         return directory / "cache.db"
                     time.sleep(0.1)
@@ -250,9 +254,118 @@ def update_automatic(root):
     print("Automatic classification active; backup:", backup)
 
 
+def preflight_native(binary):
+    config = json.loads(CONFIG.read_text())
+    if config.get("log", {}).get("output"):
+        raise RuntimeError("Explicit log output would bypass native bounded logging")
+    run(str(binary), "check", "-c", str(CONFIG))
+    with tempfile.TemporaryDirectory(prefix="network-domain-native-preflight.", dir="/var/db") as temporary:
+        directory = Path(temporary)
+        shutil.chown(directory, user="nobody", group="wheel")
+        config["experimental"]["cache_file"]["path"] = str(directory / "cache.db")
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        config["inbounds"][0]["listen_port"] = port
+        path, log_path = directory / "config.json", directory / "service.log"
+        path.write_text(json.dumps(config))
+        shutil.chown(path, user="nobody", group="wheel")
+        with (directory / "startup.log").open("wb") as output:
+            process = subprocess.Popen([
+                str(binary), "run", "--disable-color", "--log-file", str(log_path),
+                "--log-max-size", "2097152", "--log-max-backups", "3", "-c", str(path),
+            ], stdout=output, stderr=output, user="nobody", group="wheel", extra_groups=[],
+                env={key: value for key, value in os.environ.items()
+                     if key not in ("SUDO_USER", "SUDO_UID", "SUDO_GID")})
+            try:
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline and process.poll() is None:
+                    if log_path.exists() and " started (" in log_path.read_text():
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("Native preflight did not start")
+                for url in ("https://www.douyin.com/", "https://github.com/"):
+                    run("/usr/bin/curl", "--proxy", f"http://127.0.0.1:{port}", "--noproxy", "",
+                        "-fsS", "-o", "/dev/null", "--max-time", "15", url)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+
+def upgrade_native(root):
+    binary, plist = root / "network-domain-engine", root / "com.local.network-domain-proxy.plist"
+    arguments = [BINARY, "run", "--disable-color", "--log-file", "/var/log/network-domain-proxy/service.log",
+                 "--log-max-size", "2097152", "--log-max-backups", "3", "-c", str(CONFIG)]
+    candidate = plistlib.loads(plist.read_bytes())
+    if (candidate.get("Label") != LABEL.removeprefix("system/") or candidate.get("UserName") != "nobody"
+            or candidate.get("ProgramArguments") != arguments or not candidate.get("KeepAlive")):
+        raise RuntimeError("Unexpected native service definition")
+    if LEGACY_RUNNER.is_symlink() or (LEGACY_RUNNER.exists() and
+            hashlib.sha256(LEGACY_RUNNER.read_bytes()).hexdigest() != LEGACY_RUNNER_SHA256):
+        raise RuntimeError("Legacy runner differs from the reviewed version")
+    preflight_native(binary)
+    backup = Path(tempfile.mkdtemp(prefix="network-domain-native-backup.", dir="/var/db"))
+    try:
+        for source, name in ((Path(BINARY), "binary"), (Path(PLIST), "service.plist"), (CONFIG, "config.json")):
+            shutil.copy2(source, backup / name)
+        if LEGACY_RUNNER.exists():
+            shutil.copy2(LEGACY_RUNNER, backup / "runner.py")
+    except BaseException:
+        shutil.rmtree(backup)
+        raise
+    stopped = False
+    changed = False
+    try:
+        stop_service()
+        stopped = True
+        if CACHE.exists():
+            shutil.copy2(CACHE, backup / "cache.db")
+        changed = True
+        install_file(binary, BINARY, 0o755)
+        install_file(plist, PLIST, 0o644)
+        start_service()
+        time.sleep(1)
+        for url in ("https://www.douyin.com/", "https://github.com/"):
+            run("/usr/bin/curl", "--proxy", "http://127.0.0.1:17890", "--noproxy", "",
+                "-fsS", "-o", "/dev/null", "--max-time", "15", url)
+        details = run("/bin/launchctl", "print", LABEL)
+        if f"program = {BINARY}" not in details or "state = running" not in details:
+            raise RuntimeError("launchd is not running the native engine directly")
+        LEGACY_RUNNER.unlink(missing_ok=True)
+    except BaseException:
+        if stopped:
+            try:
+                if changed:
+                    stop_candidate()
+                    install_file(backup / "binary", BINARY, 0o755)
+                    install_file(backup / "service.plist", PLIST, 0o644)
+                    install_file(backup / "config.json", CONFIG, 0o644)
+                    if (backup / "runner.py").exists():
+                        install_file(backup / "runner.py", LEGACY_RUNNER, 0o755)
+                    if (backup / "cache.db").exists():
+                        install_file(backup / "cache.db", CACHE, 0o600)
+                        shutil.chown(CACHE, user="nobody", group="wheel")
+                    else:
+                        CACHE.unlink(missing_ok=True)
+                start_service()
+            except BaseException:
+                print("Native rollback incomplete; recovery backup retained:", backup, flush=True)
+                raise
+        shutil.rmtree(backup)
+        raise
+    print("Native engine active; legacy runner removed. Acceptance backup:", backup, flush=True)
+    return backup
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("install", "enable", "rollback", "update-auto"))
+    parser.add_argument("action", choices=("install", "enable", "rollback", "update-auto", "upgrade-native"))
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit("Administrator authorization required")
@@ -263,12 +376,14 @@ def main():
 
 
 def apply_action(action, root):
-    if action == "update-auto":
+    if action == "upgrade-native":
+        upgrade_native(root)
+    elif action == "update-auto":
         update_automatic(root)
     elif action == "install":
         if Path(PLIST).exists():
             raise RuntimeError("Service already installed; refusing implicit replacement")
-        binary = root / "sing-box-1.14.2-darwin-arm64/sing-box"
+        binary = root / "network-domain-engine"
         run(str(binary), "check", "-c", str(root / "config.json"))
         libexec = Path("/usr/local/libexec")
         if not libexec.exists():
@@ -282,7 +397,6 @@ def apply_action(action, root):
             install_file(warm_rule_cache(root, directory), CACHE, 0o600)
             shutil.chown(CACHE, user="nobody", group="wheel")
         install_file(root / "config.json", "/usr/local/etc/network-domain-proxy.json", 0o644)
-        install_file(root / "network-domain-proxy-run.py", "/usr/local/sbin/network-domain-proxy-run.py", 0o755)
         install_file(root / "com.local.network-domain-proxy.plist", PLIST, 0o644)
         logdir = Path("/var/log/network-domain-proxy")
         logdir.mkdir(mode=0o700)

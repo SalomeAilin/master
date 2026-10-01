@@ -23,10 +23,14 @@ var (
 	configDirectories []string
 	workingDir        string
 	disableColor      bool
+	logFile           string
+	logMaxSize        int64
+	logMaxBackups     int
+	serviceLogWriter  *log.RotatingWriter
 )
 
 var mainCommand = &cobra.Command{
-	Use:              "sing-box",
+	Use:              "network-domain-engine",
 	PersistentPreRun: preRun,
 }
 
@@ -35,6 +39,9 @@ func init() {
 	mainCommand.PersistentFlags().StringArrayVarP(&configDirectories, "config-directory", "C", nil, "set configuration directory path")
 	mainCommand.PersistentFlags().StringVarP(&workingDir, "directory", "D", "", "set working directory")
 	mainCommand.PersistentFlags().BoolVarP(&disableColor, "disable-color", "", false, "disable color output")
+	mainCommand.PersistentFlags().StringVar(&logFile, "log-file", "", "write default logs to a private rotating file")
+	mainCommand.PersistentFlags().Int64Var(&logMaxSize, "log-max-size", 2*1024*1024, "maximum bytes per log file")
+	mainCommand.PersistentFlags().IntVar(&logMaxBackups, "log-max-backups", 3, "number of numbered log archives")
 }
 
 func preRun(cmd *cobra.Command, args []string) {
@@ -52,7 +59,19 @@ func preRun(cmd *cobra.Command, args []string) {
 	if sudoUID > 0 && sudoGID > 0 {
 		globalCtx = filemanager.WithDefault(globalCtx, "", "", sudoUID, sudoGID)
 	}
-	if disableColor {
+	if logFile != "" {
+		writer, err := log.NewRotatingWriter(globalCtx, logFile, logMaxSize, logMaxBackups)
+		if err != nil {
+			log.Fatal(err)
+		}
+		serviceLogWriter = writer
+		logFactory := log.NewDefaultFactory(globalCtx, log.Formatter{
+			BaseTime: time.Now(), DisableColors: true, FullTimestamp: true,
+			TimestampFormat: "-0700 2006-01-02 15:04:05",
+		}, writer, "", nil, false)
+		common.Must(logFactory.Start())
+		log.SetStdLogger(logFactory.Logger())
+	} else if disableColor {
 		logFactory := log.NewDefaultFactory(context.Background(), log.Formatter{BaseTime: time.Now(), DisableColors: true}, os.Stderr, "", nil, false)
 		common.Must(logFactory.Start())
 		log.SetStdLogger(logFactory.Logger())

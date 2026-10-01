@@ -138,8 +138,13 @@ func create(options option.Options) (*box.Box, context.CancelFunc, error) {
 		options.Log.DisableColor = true
 	}
 	ctx, cancel := context.WithCancel(service.ExtendContext(globalCtx))
+	var defaultLogWriter io.Writer
+	if serviceLogWriter != nil {
+		defaultLogWriter = serviceLogWriter
+	}
 	instance, err := box.New(box.Options{
 		Context:                    ctx,
+		DefaultLogWriter:           defaultLogWriter,
 		Options:                    options,
 		NetworkNamespaceHolderArgs: []string{"/proc/self/exe", commandNetnsHolder.Use},
 	})

@@ -69,6 +69,7 @@ type Options struct {
 	option.Options
 	Context                    context.Context
 	PlatformLogWriter          log.PlatformWriter
+	DefaultLogWriter           io.Writer
 	NetworkNamespaceHolderArgs []string
 }
 
@@ -171,7 +172,7 @@ func New(options Options) (*Box, error) {
 		ctx = service.ContextWithPtr(ctx, urltest.NewHistoryStorage())
 	}
 	platformInterface := service.FromContext[adapter.PlatformInterface](ctx)
-	var defaultLogWriter io.Writer
+	defaultLogWriter := options.DefaultLogWriter
 	if platformInterface != nil {
 		defaultLogWriter = io.Discard
 	}
@@ -504,7 +505,7 @@ func (s *Box) PreStart() error {
 		s.Close()
 		return err
 	}
-	s.logger.Info("sing-box pre-started (", F.Seconds(time.Since(s.createdAt).Seconds()), "s)")
+	s.logger.Info("network-domain-engine pre-started (", F.Seconds(time.Since(s.createdAt).Seconds()), "s)")
 	return nil
 }
 
@@ -523,7 +524,7 @@ func (s *Box) Start() error {
 		s.Close()
 		return err
 	}
-	s.logger.Info("sing-box started (", F.Seconds(time.Since(s.createdAt).Seconds()), "s)")
+	s.logger.Info("network-domain-engine started (", F.Seconds(time.Since(s.createdAt).Seconds()), "s)")
 	return nil
 }
 

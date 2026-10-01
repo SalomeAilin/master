@@ -4,8 +4,12 @@
   <key>Label</key><string>com.local.network-domain-proxy</string>
   <key>UserName</key><string>nobody</string>
   <key>ProgramArguments</key><array>
-    <string>/usr/local/bin/python3</string><string>-B</string>
-    <string>/usr/local/sbin/network-domain-proxy-run.py</string>
+    <string>/usr/local/libexec/network-domain-sing-box</string>
+    <string>run</string><string>--disable-color</string>
+    <string>--log-file</string><string>/var/log/network-domain-proxy/service.log</string>
+    <string>--log-max-size</string><string>2097152</string>
+    <string>--log-max-backups</string><string>3</string>
+    <string>-c</string><string>/usr/local/etc/network-domain-proxy.json</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

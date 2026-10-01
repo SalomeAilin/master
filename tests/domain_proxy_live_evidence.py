@@ -65,7 +65,7 @@ def main():
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     config = json.loads(Path("/usr/local/etc/network-domain-proxy.json").read_text())
-    pids = subprocess.check_output(["/usr/bin/pgrep", "-f", "^/usr/local/libexec/network-domain-sing-box run -c /usr/local/etc/network-domain-proxy.json$"], text=True).split()
+    pids = subprocess.check_output(["/usr/bin/pgrep", "-f", "^/usr/local/libexec/network-domain-sing-box run( |$)"], text=True).split()
     if len(pids) != 1:
         raise RuntimeError("Expected exactly one production proxy engine")
     report = {"time": datetime.datetime.now().astimezone().isoformat(), "engine_pid": int(pids[0]), "probes": []}

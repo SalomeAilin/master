@@ -67,24 +67,47 @@ Sources: [sing-geosite](https://github.com/SagerNet/sing-geosite),
 [sing-geoip](https://github.com/SagerNet/sing-geoip), and
 [native rule-set updates](https://sing-box.sagernet.org/configuration/rule-set/).
 
-Since 2026-09-26, the running engine is built from the stable `v1.14.2` tag in
+The engine source starts from the stable `v1.14.2` tag in
 [SalomeAilin/sing-box](https://github.com/SalomeAilin/sing-box), commit
-`af6e64c3b69e6132ebaee0e1a3d24e93903f6709`, with no engine source changes.
+`af6e64c3b69e6132ebaee0e1a3d24e93903f6709`. The local derivative is named
+`network-domain-engine`, version `1.14.2-network-split.1`. Its native CLI owns
+private numbered log rotation and passes the same writer to the routing engine.
+launchd directly manages the engine process; the Python proxy supervisor is retired.
+Startup configuration errors use the same bounded logger. Each new log file is
+capped at 2 MiB, with three archives; oversized entries are truncated with a
+marker. Pre-existing historical archives are preserved until normal rotation
+expires them. Native rotation is per process: never start a second process
+against the production log path or apply an external rotator to these files.
 The build uses Go 1.26.8, darwin/arm64, CGO, the full
-`release/DEFAULT_BUILD_TAGS`, and `release/LDFLAGS`. Installed binary SHA-256:
-`09e56e101f5340b4c43e331a07a4f99d434cc785b68c0ca68939efe0cf0f025c`.
+`release/DEFAULT_BUILD_TAGS`, and `release/LDFLAGS`, plus the derivative version.
+Installed native binary SHA-256:
+`10904f61d17481a4763bd2d0e37849189eb7ef0ee11c612abafa5b8c1494249c`.
+Build from `sing-box/` into an existing task staging directory:
+
+```sh
+CGO_ENABLED=1 GOTOOLCHAIN=go1.26.8 go build -trimpath -buildvcs=false \
+  -tags "$(cat release/DEFAULT_BUILD_TAGS)" \
+  -ldflags "-s -w $(cat release/LDFLAGS) -X github.com/sagernet/sing-box/constant.Version=1.14.2-network-split.1" \
+  -o /path/to/staging/network-domain-engine ./cmd/sing-box
+```
+
 The stable source is tracked under [sing-box/](sing-box/) as a squashed Git
 subtree, not a separate nested repository. Its original license, source tree
 and optional client references are preserved; the root `.gitmodules` maps those
 clients to their prefixed paths. The engine build does not require initializing
 the optional client submodules. Compiled binaries and local caches are ignored.
-Only the proxy engine was replaced; routing, DNS, service configuration and
-cache were preserved. The inactive official binary backup was removed at the
-owner's request after verifying the running source-built binary.
+The native takeover changes the proxy binary and its launchd arguments while
+preserving routing, DNS, policy and the active cache. DNS observation and the
+existing IP guards remain separate components for applications bypassing the
+HTTP/HTTPS proxy. This is not a complete replacement of the routing stack.
 
-After replacement, held TLS connections and unique kernel sockets confirmed
-Douyin and CSDN over Ethernet and GitHub over Wi-Fi, each returning HTTP 200.
-The source build also passed isolated automatic-classification, rule-update,
+The 2026-09-26 source-build checks confirmed Douyin and CSDN over Ethernet and
+GitHub over Wi-Fi, each returning HTTP 200. On 2026-10-01 at 22:45, the native
+takeover was accepted with held, certificate-verified TLS connections and unique
+new kernel sockets: Douyin used Ethernet and GitHub used Wi-Fi, both HTTP 200.
+launchd owned the single native proxy process directly, and the retired Python
+supervisor had exited. No raw addresses or browsing logs are published here.
+The native candidate also passed isolated automatic-classification, rule-update,
 cached-restart and fail-closed checks. These checks do not establish long-term
 stability or video playback quality; source compilation alone is not a latency
 optimization.
@@ -104,21 +127,31 @@ Files:
   classifying every shared ByteDance/TikTok suffix as domestic. These entries
   affect proxy connections only, not global routes or dnsmasq configuration.
 - `/usr/local/libexec/network-domain-sing-box` is the pinned source-built binary.
-- `scripts/network-domain-proxy-run.py` is installed under `/usr/local/sbin/`.
-- `config/launchd/com.local.network-domain-proxy.plist` is a system LaunchDaemon.
+- `config/launchd/com.local.network-domain-proxy.plist` directly launches the engine
+  with `--log-file`, `--log-max-size` and `--log-max-backups`.
 - `scripts/deploy-domain-proxy.py` separates service installation from proxy activation.
-  Its fresh `install` action still expects the original release-package layout
-  and refuses to replace an installed service; it is not an engine upgrade tool.
+  Its fresh `install` action requires the compiled derivative named
+  `network-domain-engine` and refuses to replace an installed service.
+  `upgrade-native` validates the fixed launchd arguments, runs an isolated
+  unprivileged candidate and checks domestic/foreign HTTPS before stopping the
+  live proxy. It snapshots the binary, plist, configuration, reviewed old runner
+  and closed cache, then replaces the binary and plist. Failed activation
+  restores those files and restarts the old service. Successful activation
+  removes only the byte-verified retired runner and retains one root-private
+  acceptance backup until real socket evidence is checked. Remove that exact
+  backup after acceptance; a failed rollback retains and reports it.
   Its `update-auto` action first prewarms all rule sets in an isolated candidate
   using the same unprivileged account, then installs validated staged `.srs`
   seeds and `config.json`, retains a root-private configuration backup, and restores the
   previous configuration if activation health probes fail. Its deployment
   inputs retain a flat staging layout outside protected Documents: copy
-  `scripts/deploy-domain-proxy.py`, `scripts/network-domain-proxy-run.py`, and
+  `scripts/deploy-domain-proxy.py` and
   `config/launchd/com.local.network-domain-proxy.plist` there under their original
   basenames, alongside `config.json` and the three `.srs` rule files. For a fresh
-  install, also include the release binary at
-  `sing-box-1.14.2-darwin-arm64/sing-box` inside that staging directory. Run the
+  install, also include the compiled `network-domain-engine` there. For
+  `upgrade-native`, stage only that binary, the plist and deployment program;
+  it reads and preserves the installed configuration and rules. The candidate
+  binary and its parent directory must be readable by `nobody`. Run the
   staged `deploy-domain-proxy.py` as administrator with the intended action;
   running the repository copy does not assemble those deployment inputs.
   No additional updater daemon is needed.
@@ -172,12 +205,13 @@ the dnsmasq query log: the live DNS event agent consumes it for route decisions.
 | `network-split-guard.log`, `china-route.log` | Route drift and recovery evidence | `newsyslog`: 1 MiB threshold, ten archives each |
 | `network-split-dns-event-route-agent.log` | DNS-derived route changes and observer errors | `newsyslog`: 1 MiB threshold, five archives |
 | `network-split-domestic-health.log` | Domestic HTTP probe failures and recovery | `newsyslog`: 1 MiB threshold, five archives |
-| `network-domain-proxy/service.log` | Domain routing and proxy connection errors | Existing proxy supervisor: 2 MiB threshold, three archives |
+| `network-domain-proxy/service.log` | Domain routing, startup and proxy connection errors | Native engine: 2 MiB cap for newly written files, three numbered archives |
 | Guard and health `.out` / `.err` | Short-lived job output and startup failures | `newsyslog`: 256 KiB threshold, three archives each |
 | DNS event agent `.out` / `.err` | Long-lived process startup/output channels | Presently empty; not covered by the main-log rotation guarantee |
 
 Additional tests: `python3 -B tests/domain_proxy.py`,
 `python3 -B tests/domain_proxy_deploy.py`,
+`python3 -B tests/domain_proxy_native.py <network-domain-engine-binary>`,
 `python3 -B tests/domain_proxy_automatic.py <sing-box-binary>` and
 `python3 -B tests/domain_proxy_failclosed.py <sing-box-binary> [seed-directory]`.
 The automatic fixture uses local rule/DNS data and invalid egress interfaces;
@@ -244,7 +278,7 @@ Offline checks: `zsh tests/remote_access.zsh`.
 - `scripts/network-split-dns-event-route-agent.py` -> `/usr/local/sbin/`
 - `scripts/network_split_policy.py` -> `/usr/local/sbin/` (required by the DNS event agent and shell guards)
 - `scripts/network-split-domestic-health.sh` -> `/usr/local/sbin/`
-- `scripts/network-domain-proxy-run.py` -> `/usr/local/sbin/`
+- Compiled `network-domain-engine` -> `/usr/local/libexec/network-domain-sing-box` (legacy installation path retained)
 - `scripts/deploy-domain-proxy.py` -> `/usr/local/sbin/network-domain-proxy-deploy.py` (manual maintenance entry, not a daemon)
 - `config/dnsmasq-network-split.conf` -> `/usr/local/etc/`
 - `config/china_ip_list.txt` -> `/usr/local/etc/`
@@ -265,10 +299,10 @@ remain available in Git history, not in the current deployment or test suite.
 
 | Role | Files | Use on this Mac |
 | --- | --- | --- |
-| Runtime | `scripts/network-domain-proxy-run.py`, `scripts/network-split-dns-event-route-agent.py`, `scripts/network-split-guard.sh`, `scripts/china-route.sh`, `scripts/network-split-domestic-health.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
+| Runtime | Native proxy engine, `scripts/network-split-dns-event-route-agent.py`, `scripts/network-split-guard.sh`, `scripts/china-route.sh`, `scripts/network-split-domestic-health.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
 | Shared dependency | `scripts/network_split_policy.py` | Required by the event agent and both routing scripts; not a redundant daemon |
 | Maintenance | `scripts/build-domain-proxy.py`, `scripts/deploy-domain-proxy.py`, `scripts/deploy-security-update.zsh`, `scripts/deploy-remote-access.zsh`, `scripts/install-network-split-dns-event-route-agent.sh` | Manual build, deployment and installation tools, not background jobs; installation can restart services |
-| Verification | The ten files in `tests/` | Retained tests, not launchd jobs; `domain_proxy_live_evidence.py` accesses the live network and requires administrator authorization |
+| Verification | Files in `tests/` and native log tests in `sing-box/log/` | Retained tests, not launchd jobs; `domain_proxy_live_evidence.py` accesses the live network and requires administrator authorization |
 
 Source/deployed copies have different roles: the repository is the editable
 source; `/usr/local/sbin` is the launchd execution location. Compare their

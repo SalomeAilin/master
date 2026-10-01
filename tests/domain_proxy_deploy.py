@@ -1,7 +1,9 @@
 """Activation rollback checks without changing system services or files."""
 import importlib.util
+import hashlib
 from contextlib import nullcontext
 from pathlib import Path
+import plistlib
 import shutil
 import tempfile
 import unittest
@@ -202,6 +204,106 @@ class DeploymentTests(unittest.TestCase):
     def test_cache_backup_failure_keeps_old_cache_and_restarts_old_service(self):
         self.exercise(False, existing_cache=True, failed_cache_copy=True)
 
+
+class NativeDeploymentTests(unittest.TestCase):
+    def exercise(self, failure=None, existing_cache=True):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary, plist, config, cache, runner = (root / name for name in
+                                                    ("active-binary", "active.plist", "active.json", "cache.db", "runner.py"))
+            binary.write_bytes(b"old binary")
+            plist.write_bytes(b"old plist")
+            config.write_text("unchanged config")
+            runner.write_bytes(b"old runner")
+            if existing_cache:
+                cache.write_bytes(b"old cache")
+            (root / "network-domain-engine").write_bytes(b"native binary")
+            definition = {"Label": deploy.LABEL.removeprefix("system/"), "UserName": "nobody", "KeepAlive": True,
+                          "ProgramArguments": [str(binary), "run", "--disable-color", "--log-file",
+                                               "/var/log/network-domain-proxy/service.log", "--log-max-size", "2097152",
+                                               "--log-max-backups", "3", "-c", str(config)]}
+            (root / "com.local.network-domain-proxy.plist").write_bytes(plistlib.dumps(definition))
+            events = []
+            make_temporary = tempfile.mkdtemp
+
+            def preflight(candidate):
+                events.append("preflight")
+                if failure == "preflight":
+                    raise RuntimeError("simulated preflight failure")
+
+            def stop():
+                events.append("stop")
+                if failure == "stop":
+                    raise RuntimeError("simulated stop failure")
+
+            def install(source, target, mode):
+                if failure == "rollback" and Path(source).name == "binary":
+                    raise RuntimeError("simulated rollback failure")
+                shutil.copyfile(source, target)
+
+            def command(*args):
+                if args[0] == "/usr/bin/curl" and failure in ("activation", "rollback"):
+                    cache.write_bytes(b"candidate cache")
+                    raise RuntimeError("simulated activation failure")
+                return f"program = {binary}\nstate = running\n"
+
+            with patch.object(deploy, "BINARY", str(binary)), patch.object(deploy, "PLIST", str(plist)), \
+                    patch.object(deploy, "CONFIG", config), patch.object(deploy, "CACHE", cache), \
+                    patch.object(deploy, "LEGACY_RUNNER", runner), \
+                    patch.object(deploy, "LEGACY_RUNNER_SHA256", hashlib.sha256(b"old runner").hexdigest()), \
+                    patch.object(deploy, "preflight_native", side_effect=preflight), \
+                    patch.object(deploy, "stop_service", side_effect=stop), \
+                    patch.object(deploy, "stop_candidate") as stop_candidate, \
+                    patch.object(deploy, "start_service") as start, \
+                    patch.object(deploy, "run", side_effect=command) as run, \
+                    patch.object(deploy, "install_file", side_effect=install), \
+                    patch.object(deploy.shutil, "chown"), patch.object(deploy.time, "sleep"), \
+                    patch.object(deploy.tempfile, "mkdtemp", side_effect=lambda **kw: make_temporary(dir=root)):
+                if failure:
+                    with self.assertRaisesRegex(RuntimeError, "simulated"):
+                        deploy.upgrade_native(root)
+                else:
+                    backup = deploy.upgrade_native(root)
+                    self.assertEqual((backup / "binary").read_bytes(), b"old binary")
+                    self.assertEqual(binary.read_bytes(), b"native binary")
+                    self.assertFalse(runner.exists())
+                self.assertEqual(config.read_text(), "unchanged config")
+                self.assertFalse(any(c.args[0] == "/usr/sbin/networksetup" for c in run.call_args_list))
+                backups = [path for path in root.iterdir() if path.is_dir()]
+                if failure != "rollback":
+                    self.assertEqual(len(backups), 0 if failure else 1)
+                    if failure:
+                        self.assertEqual(binary.read_bytes(), b"old binary")
+                        self.assertEqual(plist.read_bytes(), b"old plist")
+                        self.assertEqual(runner.read_bytes(), b"old runner")
+                    if existing_cache:
+                        self.assertEqual(cache.read_bytes(), b"old cache")
+                    else:
+                        self.assertFalse(cache.exists())
+                else:
+                    self.assertEqual(len(backups), 1)
+                self.assertEqual(events, ["preflight"] if failure == "preflight" else ["preflight", "stop"])
+                self.assertEqual(start.call_count, 0 if failure in ("stop", "preflight") else
+                                 1 if not failure or failure == "rollback" else 2)
+                self.assertEqual(stop_candidate.call_count, 1 if failure in ("activation", "rollback") else 0)
+
+    def test_native_activation_removes_only_reviewed_runner(self):
+        self.exercise()
+
+    def test_native_activation_failure_restores_binary_service_runner_and_cache(self):
+        self.exercise("activation")
+
+    def test_native_rollback_removes_only_new_cache_when_previously_absent(self):
+        self.exercise("activation", existing_cache=False)
+
+    def test_native_preflight_failure_leaves_live_files_untouched(self):
+        self.exercise("preflight")
+
+    def test_native_stop_failure_does_not_publish_candidate(self):
+        self.exercise("stop")
+
+    def test_native_rollback_failure_retains_recovery_backup(self):
+        self.exercise("rollback")
 
 if __name__ == "__main__":
     unittest.main()
