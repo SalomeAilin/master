@@ -304,34 +304,52 @@ func (r *ruleStore) updater(ctx context.Context, source RuleSource, foreign Egre
 	interval, _ := time.ParseDuration(source.Interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	// The validator of the data now active. Revalidating with it costs a small
+	// 304 response instead of the whole dataset over the metered Wi-Fi link.
+	etag := ""
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.URL, nil)
-		if err != nil {
-			log.write("rule_update_failed", 0, map[string]any{"kind": source.Kind, "error": err.Error()})
-			continue
-		}
-		response, err := client.Do(request)
-		if err == nil {
-			var data []byte
-			if response.StatusCode != 200 {
-				err = fmt.Errorf("rule HTTP status %d", response.StatusCode)
-			} else {
-				data, err = io.ReadAll(io.LimitReader(response.Body, maxRuleBytes+1))
-				if err == nil {
-					err = r.apply(source.Kind, data)
-				}
-			}
-			response.Body.Close()
-		}
+		event, err := r.fetch(ctx, client, source, &etag)
 		if err != nil {
 			log.write("rule_update_failed", 0, map[string]any{"kind": source.Kind, "error": err.Error()})
 		} else {
-			log.write("rule_updated", 0, map[string]any{"kind": source.Kind})
+			log.write(event, 0, map[string]any{"kind": source.Kind})
 		}
 	}
+}
+
+// fetch downloads and applies one dataset unless the server confirms that the
+// active data is unchanged. etag is updated only after a successful apply.
+func (r *ruleStore) fetch(ctx context.Context, client *http.Client, source RuleSource, etag *string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.URL, nil)
+	if err != nil {
+		return "", err
+	}
+	if *etag != "" {
+		request.Header.Set("If-None-Match", *etag)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	switch {
+	case response.StatusCode == http.StatusNotModified && *etag != "":
+		return "rule_unchanged", nil
+	case response.StatusCode != http.StatusOK:
+		return "", fmt.Errorf("rule HTTP status %d", response.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxRuleBytes+1))
+	if err == nil {
+		err = r.apply(source.Kind, data)
+	}
+	if err != nil {
+		return "", err
+	}
+	*etag = response.Header.Get("ETag")
+	return "rule_updated", nil
 }

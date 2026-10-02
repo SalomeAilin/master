@@ -94,10 +94,13 @@ Local policy is still read from the checked-in `config/` files.
 
 Valid cached JSON takes precedence over read-only installation seeds, so a
 restart survives unavailable update servers. Updates occur hourly over
-certificate-verified HTTPS bound to the foreign interface. Each payload is
-limited to 16 MiB, parsed strictly and compiled before atomic cache replacement
-and in-memory activation. Failed, empty, oversized, unsupported or corrupt
-updates keep the last working rules. Runtime caches are private, with only
+certificate-verified HTTPS bound to the foreign interface. After the first
+download each check sends the dataset's ETag, so an unchanged dataset costs a
+small 304 response instead of a full download over the metered Wi-Fi link; a
+validator is adopted only together with data that was applied successfully.
+Each payload is limited to 16 MiB, parsed strictly and compiled before atomic
+cache replacement and in-memory activation. Failed, empty, oversized,
+unsupported or corrupt updates keep the last working rules. Runtime caches are private, with only
 three fixed dataset names. No additional updater daemon is installed.
 
 ## Verification Limits

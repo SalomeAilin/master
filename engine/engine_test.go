@@ -180,6 +180,65 @@ func TestCorruptUpdateRetainsRulesAndCachedRestart(t *testing.T) {
 	}
 }
 
+func TestRuleRefreshRevalidatesInsteadOfDownloading(t *testing.T) {
+	rules, err := newRules(fixtureConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	version, payload := `W/"v1"`, `{"version":2,"rules":[{"domain_suffix":["etag-v1.test"]}]}`
+	var full, revalidated int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Header.Get("If-None-Match") == version {
+			revalidated++
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		full++
+		w.Header().Set("ETag", version)
+		io.WriteString(w, payload)
+	}))
+	defer server.Close()
+	publish := func(newVersion, newPayload string) {
+		mu.Lock()
+		defer mu.Unlock()
+		version, payload = newVersion, newPayload
+	}
+	source := RuleSource{Kind: "domestic", URL: server.URL}
+	etag := ""
+	fetch := func(want string) {
+		t.Helper()
+		event, err := rules.fetch(context.Background(), server.Client(), source, &etag)
+		if want == "" && err == nil || want != "" && (err != nil || event != want) {
+			t.Fatalf("want %q, got %q %v", want, event, err)
+		}
+	}
+	fetch("rule_updated")
+	fetch("rule_unchanged")
+	fetch("rule_unchanged")
+	if full != 1 || revalidated != 2 || etag != `W/"v1"` || rules.domain("etag-v1.test") != "domestic" {
+		t.Fatalf("full=%d revalidated=%d etag=%q", full, revalidated, etag)
+	}
+	publish(`W/"v2"`, `{"version":2,"rules":[{"domain_suffix":["etag-v2.test"]}]}`)
+	fetch("rule_updated")
+	if etag != `W/"v2"` || rules.domain("etag-v2.test") != "domestic" || rules.domain("etag-v1.test") != "" {
+		t.Fatal("changed dataset not applied", etag)
+	}
+	// A corrupt dataset is rejected without adopting its validator.
+	publish(`W/"v3"`, `corrupt`)
+	fetch("")
+	fetch("")
+	if etag != `W/"v2"` || rules.domain("etag-v2.test") != "domestic" || full != 4 {
+		t.Fatalf("corrupt update adopted: etag=%q full=%d", etag, full)
+	}
+	// Without a validator a 304 is not proof of unchanged data.
+	etag = ""
+	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotModified) })
+	fetch("")
+}
+
 func TestRuleFormatsAndBoundary(t *testing.T) {
 	m, err := compileRules(DomainRules{Domain: []string{"exact.test"}, Suffix: []string{"suffix.test"}, Keyword: []string{"needle"}, Regex: []string{`^video\d+\.test$`}, CIDR: []string{"223.5.5.0/24"}})
 	if err != nil {

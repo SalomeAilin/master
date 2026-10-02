@@ -52,7 +52,7 @@ ignored by Git so its existing external updater can keep using the same path.
 ## Browser Domain Routing
 
 The independent proxy implementation is in [engine/](engine/README.md), version
-`0.1.1-independent`. It is authored in this repository and builds using only
+`0.1.2-independent`. It is authored in this repository and builds using only
 the Go standard library, without importing or executing sing-box. The existing
 DNS event observer, IP guards and dnsmasq service remain separate components.
 Production takeover was accepted on 2026-10-02 at 11:32 (+08:00), after macOS
@@ -95,7 +95,8 @@ The three externally maintained datasets are JSON from
 [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat), retained
 under their [original license](https://github.com/MetaCubeX/meta-rules-dat/blob/master/LICENSE).
 They are classification data, not imported engine code. Hourly native updates
-validate and compile before replacing the private cache and live rules.
+revalidate with the last ETag, so unchanged data is not downloaded again, and
+validate and compile new data before replacing the private cache and live rules.
 Failed or corrupt updates preserve the last good data. Root-owned initial
 seeds allow offline startup; valid cache files take precedence after updates.
 The external datasets, Go and macOS retain their own authorship and licenses.
