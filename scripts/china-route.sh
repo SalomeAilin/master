@@ -76,7 +76,7 @@ route_ready() {
 ipv4s_for_domain() {
   /usr/bin/dig +time=2 +tries=2 +short A @"$DNS_SERVER" "$1" 2>/dev/null | \
     /usr/bin/awk -F. 'NF == 4 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {print}' | \
-    /usr/bin/sort -u | /usr/local/bin/python3 /usr/local/sbin/network_split_policy.py
+    /usr/bin/sort -u | /usr/local/sbin/network-split-policy
 }
 
 routes_healthy() {

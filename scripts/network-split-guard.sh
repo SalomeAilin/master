@@ -243,7 +243,7 @@ add_domestic_host_route() {
   local domain="$1" ip="$2"
   local before add_error
 
-  /usr/local/bin/python3 /usr/local/sbin/network_split_policy.py "$ip" || return 0
+  /usr/local/sbin/network-split-policy "$ip" || return 0
 
   before="$(/sbin/route -n get "$ip" 2>/dev/null | /usr/bin/awk '
     /gateway:/{gateway=$2}
@@ -299,7 +299,7 @@ check_domestic_domain() {
   fi
 
   # Load policy once for the DNS answer batch, not once for each address.
-  ips_text="$(/usr/bin/printf '%s\n' "$ips_text" | /usr/local/bin/python3 -B /usr/local/sbin/network_split_policy.py)" || return 0
+  ips_text="$(/usr/bin/printf '%s\n' "$ips_text" | /usr/local/sbin/network-split-policy)" || return 0
   # Policy rejection is not a DNS failure and must not trigger route repair.
   [ -n "$ips_text" ] || return 0
   ips=("${(@f)ips_text}")

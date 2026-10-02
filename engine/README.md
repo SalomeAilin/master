@@ -1,6 +1,7 @@
 # Independent Routing Engine
 
-This directory contains an independently written macOS direct-proxy engine.
+This directory contains an independently written macOS direct-proxy engine and
+the Go programs for the rest of the split-routing system (see the table below).
 It does not import, link, copy, invoke, or build the former sing-box engine.
 `go list -m all` lists only `network-owned-engine`; there are no third-party
 Go module dependencies or a `go.sum`. Protocol parsing, HTTP, TLS and the DNS
@@ -25,12 +26,29 @@ CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags '-s -w' \
   -o /path/to/staging/network-domain-engine .
 ```
 
-Package-local tests are colocated with their Go package. Integration checks
-and deployment checks are in the repository's `tests/` directory.
+Package-local tests are colocated with their Go package. Integration tests that
+build and run the engine binary use the `integration` tag:
+`go test -tags integration -run Integration .`; add `NETWORK_SPLIT_LIVE=1` for
+the real-network fail-closed check.
 
-From the repository root, generate a configuration into an existing private
-staging directory with `python3 -B scripts/build-domain-proxy.py <config-path>`.
-The program accepts `check -c <path>`, `run -c <path>` and `version`.
+The module also holds the rest of the system's programs, so no root or
+`nobody` service depends on an interpreter:
+
+| Program | Role |
+| --- | --- |
+| `.` (`network-domain-engine`) | Interface-bound HTTP/SOCKS proxy, run by launchd as `nobody` |
+| `cmd/network-split-policy` | Address policy for the zsh route guards: one address sets the exit status; standard input is filtered to authorized addresses |
+| `cmd/network-split-dns-event-route-agent` | Root daemon that tails dnsmasq's query log and binds authorized domestic answers to Ethernet; `-check` verifies its inputs |
+| `cmd/network-domain-proxy-config` | Writes the engine configuration from `config/` |
+| `cmd/network-domain-proxy-deploy` | Transactional `install`, `upgrade`, `enable` and `rollback` |
+| `cmd/network-domain-proxy-evidence` | Read-only live egress evidence |
+
+Shared code is in `internal/`: `policy`, `dnsobserver`, `proxyconfig` and
+`deploy`.
+
+Generate a configuration into an existing private staging directory with
+`go run ./cmd/network-domain-proxy-config <config-path>`.
+The engine accepts `check -c <path>`, `run -c <path>` and `version`.
 Private native logs use `--log-file`, `--log-max-size` and
 `--log-max-backups`. The service defaults to one 2 MiB active file and three
 numbered archives. Oversized entries are marked and bounded; an old oversized

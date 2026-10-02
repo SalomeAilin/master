@@ -6,33 +6,40 @@ This repository backs up the active split-routing configuration for this Mac.
 
 | Directory | Contents |
 | --- | --- |
-| `scripts/` | Runtime scripts, shared policy module, and manual build/install tools |
+| `scripts/` | zsh route guards, health check and installers |
 | `config/` | Domain/address policy and DNS/SSH configuration sources |
 | `config/launchd/` | LaunchDaemon property lists |
 | `config/chrome/` | Chrome preference snapshots |
-| `tests/` | Offline checks and the explicitly authorized live-evidence check |
+| `tests/` | Offline zsh checks of the route guards and installers |
 | `docs/` | Published, redacted verification records |
 | `assets/images/` | Project images with descriptive names |
 | `archive/` | Preserved historical material; not an active policy or deployment source |
-| `engine/` | Independent Go proxy source and package-local tests |
+| `engine/` | Go module: proxy engine, address policy, DNS event agent, configuration and deployment tools, with package-local tests |
 | `local/` | Private working documents and preserved local caches; ignored by Git |
 
 File organization is part of every project task, checked at task start and
 completion. Follow the [automatic organization rules](AGENTS.md) when creating,
 moving, archiving, or cleaning up task files.
 
-Run repository commands from the repository root. For example:
+Since 2026-10-02 the repository contains no Python. Every program the root and
+`nobody` services run is a Go binary built from `engine/` or a zsh script. The
+former Python address policy, DNS event agent, configuration builder and
+deployment tool were ported to `engine/cmd/` after their decisions and output
+were compared with the originals. Root services therefore no longer run an
+interpreter that an administrator account can modify without authentication.
+
+Run Go checks from `engine/` and the shell checks from the repository root:
 
 ```sh
-python3 -B tests/security_policy.py
+(cd engine && go test -race ./... && go vet ./...)
 zsh tests/security_shell.zsh
 ```
 
-To generate proxy configuration, use
-`python3 -B scripts/build-domain-proxy.py /path/to/staging/config.json`, replacing
-`/path/to/staging` with an existing private staging directory. The builder reads
-policy from `config/`. System installation still requires administrator
-authorization; see the deployment sections below.
+To generate proxy configuration, run
+`(cd engine && go run ./cmd/network-domain-proxy-config /path/to/staging/config.json)`,
+replacing `/path/to/staging` with an existing private staging directory. The tool
+reads policy from the nearest `config/` directory. System installation still
+requires administrator authorization; see the deployment sections below.
 
 The generated `network-split-status.html` stays at the repository root and is
 ignored by Git so its existing external updater can keep using the same path.
@@ -105,15 +112,18 @@ Build with Go 1.26.8 from `engine/` into an existing task staging directory:
 ```sh
 CGO_ENABLED=0 GOTOOLCHAIN=go1.26.8 go build -trimpath -buildvcs=false \
   -ldflags '-s -w' -o /path/to/staging/network-domain-engine .
+CGO_ENABLED=0 GOTOOLCHAIN=go1.26.8 go build -trimpath -buildvcs=false \
+  -ldflags '-s -w' -o /path/to/staging/network-domain-proxy-deploy ./cmd/network-domain-proxy-deploy
 ```
 
-From the repository root, generate `config.json` in that staging directory
-with `python3 -B scripts/build-domain-proxy.py /path/to/staging/config.json`.
-The builder reads the existing policies in `config/`; it does not download
-data, install files, change routes or start services.
+Generate `config.json` in that staging directory with
+`go run ./cmd/network-domain-proxy-config /path/to/staging/config.json` from
+`engine/`. It reads the existing policies in `config/` and writes output
+byte-identical to the former Python builder; it does not download data,
+install files, change routes or start services.
 
-Flat staging inputs are the compiled `network-domain-engine`, generated
-`config.json`, `scripts/deploy-domain-proxy.py`,
+Flat staging inputs are the compiled `network-domain-engine` and
+`network-domain-proxy-deploy`, generated `config.json`,
 `config/launchd/com.local.network-domain-proxy.plist`, and three JSON files
 named `domestic.json`, `foreign.json`, `china.json` downloaded over
 certificate-verified HTTPS from the URLs in the generated configuration.
@@ -142,14 +152,14 @@ proxy while browsers still point at it.
 
 ### Verification
 
-`go test -race ./...` from `engine/`, plus
-`python3 -B tests/domain_proxy.py`,
-`python3 -B tests/domain_proxy_deploy.py`,
-`python3 -B tests/domain_proxy_native.py <binary>`,
-`python3 -B tests/domain_proxy_automatic.py <binary>` and
-`python3 -B tests/domain_proxy_failclosed.py <binary> <seed-directory>`
-cover protocol forwarding, rule precedence, corrupt updates, cached restart,
-log limits, shutdown and interface-failure isolation.
+`go test -race ./...` from `engine/` covers protocol forwarding, rule
+precedence, corrupt updates, DNS caching, tunnel idle handling, the address
+policy, DNS event correlation, configuration output and every deployment
+rollback path. `go test -tags integration -run Integration .` additionally runs
+the compiled engine: log limits and SIGTERM, automatic classification, hot and
+corrupt updates and cached restart. `NETWORK_SPLIT_LIVE=1` adds the real-network
+check that an invalid foreign interface fails closed while domestic access
+works; `NETWORK_SPLIT_RULES` selects its seed directory.
 
 Production acceptance on 2026-10-02 at 11:32 (+08:00) held certificate-verified
 TLS connections and matched each request's native log to a unique new kernel
@@ -173,11 +183,13 @@ acceptance backup was removed after these checks. This is a short production
 acceptance sample, not a long-term stability guarantee or video test. No raw
 socket addresses or browsing logs are published.
 
-After installation, run the read-only
-`python3 -B tests/domain_proxy_live_evidence.py` with administrator
-authorization. It holds verified TLS connections, correlates the current
-request's structured log with kernel sockets and reports ambiguous attribution
-honestly. Keep raw output private. Historical measurements remain in the
+After installation, build and run the read-only
+`engine/cmd/network-domain-proxy-evidence` with administrator authorization. It
+holds verified TLS connections, correlates the current request's structured log
+with kernel sockets and reports ambiguous attribution honestly. Without
+administrator rights it reports that the socket table is unavailable: macOS
+hides it from that program's netstat, and lsof needs root. Keep raw output
+private. Historical measurements remain in the
 [redacted verification record](docs/verification-2026-09-11.html); they do not
 prove present-day performance, a physical Wi-Fi-loss test, Claude application
 health or long-term playback quality.
@@ -186,8 +198,8 @@ health or long-term playback quality.
 
 The system configuration `/etc/newsyslog.d/network-split.conf` controls rotation
 for the route guard, China routes, DNS event agent, and domestic health check.
-The DNS event agent uses `WatchedFileHandler` so it reopens the current log
-after external rotation instead of continuing to write into an archive.
+The DNS event agent reopens its log before each write when the file was rotated
+or removed, so it never continues writing into an archive.
 macOS runs `newsyslog` hourly at minute 30, so these thresholds are checked
 periodically rather than enforced as hard byte caps. Do not manually remove
 the dnsmasq query log: the live DNS event agent consumes it for route decisions.
@@ -202,12 +214,8 @@ the dnsmasq query log: the live DNS event agent consumes it for route decisions.
 | Guard and health `.out` / `.err` | Short-lived job output and startup failures | `newsyslog`: 256 KiB threshold, three archives each |
 | DNS event agent `.out` / `.err` | Long-lived process startup/output channels | Presently empty; not covered by the main-log rotation guarantee |
 
-Additional tests: `python3 -B tests/domain_proxy.py`,
-`python3 -B tests/domain_proxy_deploy.py`,
-`python3 -B tests/domain_proxy_native.py <network-domain-engine-binary>`,
-`python3 -B tests/domain_proxy_automatic.py <network-domain-engine-binary>` and
-`python3 -B tests/domain_proxy_failclosed.py <network-domain-engine-binary> [seed-directory]`.
-The automatic fixture uses local rule/DNS data and invalid egress interfaces;
+The integration tests in `engine/integration_test.go` build the engine and run
+it. The automatic fixture uses local rule/DNS data and invalid egress interfaces;
 it checks precedence, unknown-IP decisions, hot updates, corrupt-update
 retention and cached restart with the update server unavailable. These are
 engine tests, not proof of production video playback quality.
@@ -268,11 +276,11 @@ Offline checks: `zsh tests/remote_access.zsh`.
 
 - `scripts/network-split-guard.sh` -> `/usr/local/sbin/network-split-guard.sh`
 - `scripts/china-route.sh` -> `/usr/local/sbin/china-route.sh`
-- `scripts/network-split-dns-event-route-agent.py` -> `/usr/local/sbin/`
-- `scripts/network_split_policy.py` -> `/usr/local/sbin/` (required by the DNS event agent and shell guards)
+- `engine/cmd/network-split-dns-event-route-agent` (Go) -> `/usr/local/sbin/network-split-dns-event-route-agent`
+- `engine/cmd/network-split-policy` (Go) -> `/usr/local/sbin/network-split-policy` (address policy the shell guards call)
 - `scripts/network-split-domestic-health.sh` -> `/usr/local/sbin/`
 - Compiled independent `network-domain-engine` -> `/usr/local/libexec/network-domain-engine`
-- `scripts/deploy-domain-proxy.py` -> `/usr/local/sbin/network-domain-proxy-deploy.py` (manual maintenance entry, not a daemon)
+- `engine/cmd/network-domain-proxy-deploy` (Go) -> `/usr/local/sbin/network-domain-proxy-deploy` (manual maintenance entry, not a daemon)
 - `config/dnsmasq-network-split.conf` -> `/usr/local/etc/`
 - `config/china_ip_list.txt` -> `/usr/local/etc/`
 - `config/domestic_domains.conf` -> `/usr/local/etc/`
@@ -293,10 +301,10 @@ former engine's license notice is retained in `archive/sing-box-LICENSE`.
 
 | Role | Files | Use on this Mac |
 | --- | --- | --- |
-| Runtime | Native proxy engine, `scripts/network-split-dns-event-route-agent.py`, `scripts/network-split-guard.sh`, `scripts/china-route.sh`, `scripts/network-split-domestic-health.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
-| Shared dependency | `scripts/network_split_policy.py` | Required by the event agent and both routing scripts; not a redundant daemon |
-| Maintenance | `scripts/build-domain-proxy.py`, `scripts/deploy-domain-proxy.py`, `scripts/deploy-security-update.zsh`, `scripts/deploy-remote-access.zsh`, `scripts/install-network-split-dns-event-route-agent.sh` | Manual build, deployment and installation tools, not background jobs; installation can restart services |
-| Verification | Files in `tests/` and Go package tests in `engine/` | Retained tests, not launchd jobs; `domain_proxy_live_evidence.py` accesses the live network and requires administrator authorization |
+| Runtime | Native proxy engine, Go DNS event agent, `scripts/network-split-guard.sh`, `scripts/china-route.sh`, `scripts/network-split-domestic-health.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
+| Shared dependency | `engine/internal/policy` (built into the agent) and the `network-split-policy` program | Address policy for the event agent and both routing scripts; not a daemon |
+| Maintenance | `network-domain-proxy-config`, `network-domain-proxy-deploy`, `network-domain-proxy-evidence` from `engine/cmd/`, `scripts/deploy-security-update.zsh`, `scripts/deploy-remote-access.zsh`, `scripts/install-network-split-dns-event-route-agent.sh` | Manual build, deployment and installation tools, not background jobs; installation can restart services |
+| Verification | Files in `tests/` and Go package tests in `engine/` | Retained tests, not launchd jobs; the evidence tool and the `NETWORK_SPLIT_LIVE` integration test use the live network |
 
 Source/deployed copies have different roles: the repository is the editable
 source; `/usr/local/sbin` is the launchd execution location. Compare their
@@ -407,19 +415,29 @@ receive an Ethernet override. Missing or malformed address policy fails closed.
 Keep both policy files and their parent directory root-owned and not writable by
 unprivileged accounts. Never automatically add exceptions from DNS answers.
 
-Install the policy module before replacing the DNS event agent or shell guards.
-Deploy `scripts/china-route.sh` and `scripts/network-split-guard.sh` together: their lock and
-force marker now live under root-only-writable `/var/db`, with no `/tmp` fallback.
-Let an existing route rebuild finish before replacement; restart the DNS event
-agent only if it is already enabled. Do not restart dnsmasq merely to update these
-scripts. Preserve query logging with `nobody:wheel` ownership and mode `0660`.
+`scripts/deploy-security-update.zsh` installs this side from a flat staging
+directory: build `network-split-policy`, `network-split-dns-event-route-agent`
+and `network-domain-proxy-deploy` from `engine/cmd/` into it, copy in
+`scripts/china-route.sh`, `scripts/network-split-guard.sh`, the agent plist from
+`config/launchd/` and the installer itself, then run the staged installer with
+administrator authorization. Before touching live files it syntax-checks the
+scripts, requires the staged policy to allow `223.5.5.5` and refuse `8.8.8.8`,
+and runs the agent's `-check`. It waits for any route rebuild to finish,
+backs up every file it replaces, and publishes the policy before the guards
+that call it, each by atomic rename. Their lock and force marker live under
+root-only-writable `/var/db`, with no `/tmp` fallback. An already loaded DNS
+event agent is booted out and bootstrapped from its new definition and must be
+running the new program; an unloaded agent stays unloaded. The former Python
+files are removed only after that, and any failure restores the backup.
+dnsmasq is not restarted. Query logging keeps `nobody:wheel` ownership and mode
+`0660`.
 
 The old event agent did not track route ownership. Before declaring migration
 complete, review existing Ethernet host routes against the address policy and
 the old agent log; remove only confirmed obsolete agent-created routes. Do not
 flush all host routes or infer ownership from the interface alone.
 
-Offline checks: `python3 -B tests/security_policy.py`,
+Offline checks: `go test ./...` in `engine/`,
 `zsh tests/security_shell.zsh`, `zsh tests/recovery.zsh`,
 `zsh tests/route-snapshot.zsh`, and `zsh tests/remote_access.zsh`. Tests do not
 mutate system routes or `/etc/ssh`.
