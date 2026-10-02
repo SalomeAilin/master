@@ -10,8 +10,9 @@ retention are implemented here.
 
 This is implementation independence, not a claim that the Go runtime, macOS or
 the external rule datasets are original work. Those components retain their
-own authorship and licenses. The historical upstream source and its notices
-remain in Git history. No upstream copyright is reassigned by this migration.
+own authorship and licenses. The historical upstream source remains in Git
+history, with its original notice at [archive/sing-box-LICENSE](../archive/sing-box-LICENSE).
+No upstream copyright is reassigned by this migration.
 
 ## Build and Check
 

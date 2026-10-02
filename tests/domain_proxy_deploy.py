@@ -1,7 +1,7 @@
 """Activation rollback checks without changing system services or files."""
 import importlib.util
 import hashlib
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 import plistlib
 import shutil
@@ -108,6 +108,25 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(deploy.start_service(), "started")
             self.assertEqual(command.call_count, 2)
 
+    def test_health_waits_for_listener_before_https_probes(self):
+        with patch.object(deploy.socket, "create_connection", side_effect=[
+                ConnectionRefusedError(), nullcontext()]) as connect, \
+                patch.object(deploy.time, "sleep") as sleep, \
+                patch.object(deploy, "run") as command:
+            deploy.health(17891)
+            self.assertEqual(connect.call_count, 2)
+            connect.assert_called_with(("127.0.0.1", 17891), timeout=0.25)
+            sleep.assert_called_once_with(0.1)
+            self.assertEqual(command.call_count, 2)
+
+    def test_listener_readiness_timeout_skips_https_probes(self):
+        with patch.object(deploy.socket, "create_connection", side_effect=ConnectionRefusedError()), \
+                patch.object(deploy.time, "monotonic", side_effect=[0, 16]), \
+                patch.object(deploy, "run") as command:
+            with self.assertRaisesRegex(RuntimeError, "listener did not become ready"):
+                deploy.health()
+            command.assert_not_called()
+
 
 class IndependentDeploymentTests(unittest.TestCase):
     def exercise(self, failure=None, already_independent=False):
@@ -183,6 +202,7 @@ class IndependentDeploymentTests(unittest.TestCase):
                 stop_candidate = stack.enter_context(patch.object(deploy, "stop_candidate"))
                 start = stack.enter_context(patch.object(deploy, "start_service"))
                 commands = stack.enter_context(patch.object(deploy, "run", side_effect=run))
+                stack.enter_context(patch.object(deploy.socket, "create_connection", return_value=nullcontext()))
                 stack.enter_context(patch.object(deploy.tempfile, "mkdtemp",
                     side_effect=lambda **kw: make_temporary(dir=root)))
                 if failure:

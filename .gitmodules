@@ -1,9 +1,0 @@
-[submodule "sing-box/clients/apple"]
-	path = sing-box/clients/apple
-	url = https://github.com/SagerNet/sing-box-for-apple.git
-[submodule "sing-box/clients/android"]
-	path = sing-box/clients/android
-	url = https://github.com/SagerNet/sing-box-for-android.git
-[submodule "sing-box/clients/desktop"]
-	path = sing-box/clients/desktop
-	url = https://github.com/SagerNet/sing-box-for-desktop.git

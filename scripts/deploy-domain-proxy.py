@@ -215,6 +215,15 @@ def preflight(binary, config, root):
 
 
 def health(port=17890):
+    deadline = time.monotonic() + 15
+    while True:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                break
+        except OSError as error:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Proxy listener did not become ready") from error
+            time.sleep(0.1)
     for url in ("https://www.douyin.com/", "https://github.com/"):
         run("/usr/bin/curl", "--proxy", f"http://127.0.0.1:{port}", "--noproxy", "",
             "-fsS", "-o", "/dev/null", "--max-time", "15", url)

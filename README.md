@@ -15,7 +15,6 @@ This repository backs up the active split-routing configuration for this Mac.
 | `assets/images/` | Project images with descriptive names |
 | `archive/` | Preserved historical material; not an active policy or deployment source |
 | `engine/` | Independent Go proxy source and package-local tests |
-| `sing-box/` | Previous upstream engine; retained until production migration is accepted |
 | `local/` | Private working documents and preserved local caches; ignored by Git |
 
 File organization is part of every project task, checked at task start and
@@ -44,11 +43,13 @@ The independent proxy implementation is in [engine/](engine/README.md), version
 `0.1.0-independent`. It is authored in this repository and builds using only
 the Go standard library, without importing or executing sing-box. The existing
 DNS event observer, IP guards and dnsmasq service remain separate components.
-The production migration has not run: its pending macOS administrator
-authentication request was canceled without executing the installer. The
-previous proxy remains active until the transactional upgrade completes with
-macOS administrator authentication.
-Do not infer that a source commit is a completed production switch.
+Production takeover was accepted on 2026-10-02 at 11:32 (+08:00), after macOS
+administrator authentication. The existing launchd job now runs the independent
+binary directly as `nobody`. The stopped previous binary, its dedicated rules
+and cache, current upstream source tree and optional client references were
+removed after acceptance. Original commits remain in Git history, and the
+former [license notice](archive/sing-box-LICENSE) is retained unchanged.
+DNS, route guards, macOS proxy settings and bypass entries were preserved.
 
 New connections use protected foreign domains, local domestic overrides,
 maintained foreign domains, then maintained domestic domains. Known domain
@@ -113,8 +114,9 @@ service arguments and production policy, starts an isolated unprivileged
 candidate and probes domestic/foreign HTTPS before stopping the live engine.
 A private kernel lock rejects overlapping deployments. After writer exit it
 snapshots exact affected files, atomically installs the binary, configuration,
-JSON seeds, plist and installer, then health-checks the live service. Failed
-activation restores affected files and cache before restarting the previous
+JSON seeds, plist and installer, waits up to 15 seconds for the listener, then
+health-checks the live service. Failed activation restores affected files and
+cache before restarting the previous
 service. A failed rollback retains and reports its private recovery backup.
 Successful activation retains one acceptance backup until real socket evidence
 has been checked; then remove that exact backup and reviewed retired core.
@@ -136,17 +138,27 @@ proxy while browsers still point at it.
 cover protocol forwarding, rule precedence, corrupt updates, cached restart,
 log limits, shutdown and interface-failure isolation.
 
-On 2026-10-02, the final independent candidate's isolated test port returned
-certificate-verified Douyin, Bilibili and Baidu Netdisk HTTP 200, Youku HTTP 302
-over Ethernet, and GitHub HTTP 200 over Wi-Fi. Each probe had a unique new
-kernel connection consistent with its correlated native log. Domestic response
-headers took 0.176-0.214 seconds and GitHub took 1.746 seconds, including TLS
-and socket inspection; these are not ping RTT or bandwidth measurements.
-The tested binary's SHA-256 was
+Production acceptance on 2026-10-02 at 11:32 (+08:00) held certificate-verified
+TLS connections and matched each request's native log to a unique new kernel
+socket. The single independent process was directly owned by launchd; the old
+process had exited. Measurements include TLS and socket inspection, not ping
+RTT or bandwidth:
+
+| Probe | HTTP | Kernel Egress | Seconds to Response Headers |
+| --- | --- | --- | --- |
+| Douyin | 200 | Ethernet | 0.168 |
+| Bilibili | 200 | Ethernet | 0.231 |
+| Youku | 302 | Ethernet | 0.205 |
+| Baidu Netdisk | 200 | Ethernet | 0.186 |
+| CSDN | 200 | Ethernet | 0.647 |
+| GitHub | 200 | Wi-Fi | 1.196 |
+
+The installed binary matched the tested binary's SHA-256:
 `6fe3210ee89f1dfc1eff26968ac75875186fcd9e9a5887f385b8ddc767999239`.
-The candidate exited with status zero after the probes. This is a
-candidate acceptance sample, not a production-switch claim or a video test.
-No raw socket addresses or browsing logs are published.
+DNS and route-guard hashes and proxy settings remained unchanged. The reviewed
+acceptance backup was removed after these checks. This is a short production
+acceptance sample, not a long-term stability guarantee or video test. No raw
+socket addresses or browsing logs are published.
 
 After installation, run the read-only
 `python3 -B tests/domain_proxy_live_evidence.py` with administrator
@@ -246,7 +258,7 @@ Offline checks: `zsh tests/remote_access.zsh`.
 - `scripts/network-split-dns-event-route-agent.py` -> `/usr/local/sbin/`
 - `scripts/network_split_policy.py` -> `/usr/local/sbin/` (required by the DNS event agent and shell guards)
 - `scripts/network-split-domestic-health.sh` -> `/usr/local/sbin/`
-- Compiled independent `network-domain-engine` -> `/usr/local/libexec/network-domain-engine` (pending production migration)
+- Compiled independent `network-domain-engine` -> `/usr/local/libexec/network-domain-engine`
 - `scripts/deploy-domain-proxy.py` -> `/usr/local/sbin/network-domain-proxy-deploy.py` (manual maintenance entry, not a daemon)
 - `config/dnsmasq-network-split.conf` -> `/usr/local/etc/`
 - `config/china_ip_list.txt` -> `/usr/local/etc/`
@@ -260,9 +272,9 @@ Offline checks: `zsh tests/remote_access.zsh`.
 - `config/launchd/homebrew.mxcl.dnsmasq.plist` -> `/Library/LaunchDaemons/`
 - `config/sshd-remote-access.conf` -> `/etc/ssh/sshd_config.d/050-remote-access.conf` (account name filled in at install)
 
-Deploy only the files listed in this mapping. The previous proxy remains
-installed and its source retained until independent-engine acceptance;
-other retired implementations remain available in Git history.
+Deploy only the files listed in this mapping. Retired implementations remain
+available in Git history, not in the current deployment or test suite. The
+former engine's license notice is retained in `archive/sing-box-LICENSE`.
 
 ### Script Roles
 
