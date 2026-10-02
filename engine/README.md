@@ -41,6 +41,9 @@ may write a log path.
 
 The listener is IPv4 loopback only. HTTP forwarding, HTTP CONNECT, cleartext
 WebSocket upgrades, and SOCKS5 TCP CONNECT share the same routing core.
+Tunnels close after five minutes without bytes in either direction, so a quiet
+request side never ends a long download, or the reverse. A real end of stream
+is forwarded as a half-close; the other side then has 30 seconds to send again.
 SOCKS UDP, IPv6 proxy destinations, remote proxy protocols, TUN, TLS interception
 and global route changes are deliberately outside this engine.
 
@@ -58,7 +61,9 @@ connect. Multipath TCP is disabled. Interface failure is an error, never an
 invitation to dial unbound or retry on the other interface. DoH endpoints are
 IP literals with certificate-verified TLS names; there is no plaintext DNS
 transport fallback. Go's resolver handles DNS framing and response validation
-through a DoH adapter. DNS results are not persistently cached by this engine.
+through a DoH adapter. Successful answers are kept in memory for their DNS
+TTL, at most five minutes and 4096 names per resolver. Failures are not cached,
+and nothing is written to disk.
 
 ## Data and Updates
 
@@ -81,7 +86,8 @@ three fixed dataset names. No additional updater daemon is installed.
 
 Tests cover routing precedence, mixed answers, private-address rejection,
 cached restart, corrupt-update retention, native log limits, buffered CONNECT
-bytes, HTTP payload and header forwarding, SOCKS commands, DoH parsing,
-interface failure and shutdown. Isolated invalid-interface injection does not
-disconnect the host's physical Wi-Fi. Successful TLS and HTTP probes do not
+bytes, HTTP payload and header forwarding, SOCKS commands, DoH parsing, DNS
+cache lifetime, one-way transfers past the idle limit, interface failure and
+shutdown. Isolated invalid-interface injection does not disconnect the host's
+physical Wi-Fi. Successful TLS and HTTP probes do not
 establish sustained video playback quality or the absence of all defects.

@@ -40,7 +40,7 @@ ignored by Git so its existing external updater can keep using the same path.
 ## Browser Domain Routing
 
 The independent proxy implementation is in [engine/](engine/README.md), version
-`0.1.0-independent`. It is authored in this repository and builds using only
+`0.1.1-independent`. It is authored in this repository and builds using only
 the Go standard library, without importing or executing sing-box. The existing
 DNS event observer, IP guards and dnsmasq service remain separate components.
 Production takeover was accepted on 2026-10-02 at 11:32 (+08:00), after macOS
@@ -50,6 +50,9 @@ and cache, current upstream source tree and optional client references were
 removed after acceptance. Original commits remain in Git history, and the
 former [license notice](archive/sing-box-LICENSE) is retained unchanged.
 DNS, route guards, macOS proxy settings and bypass entries were preserved.
+The takeover ran `0.1.0-independent`. Version `0.1.1-independent` adds a
+TTL-bounded DNS cache and ends tunnels only when both directions are idle;
+installing it requires administrator authorization.
 
 New connections use protected foreign domains, local domestic overrides,
 maintained foreign domains, then maintained domestic domains. Known domain
@@ -64,9 +67,10 @@ are rejected, including for known domains.
 All data and DoH sockets are bound in the macOS kernel: domestic uses Ethernet
 and foreign uses Wi-Fi. There is no unbound retry or cross-interface fallback.
 Website DNS uses AliDNS DoH and Cloudflare DoH with pinned endpoint addresses
-and certificate names. Rule refresh uses foreign DoH for hostname resolution
-and HTTPS pinned to Wi-Fi. Failed foreign access does not fall back to Ethernet;
-domestic access remains independently available.
+and certificate names. Successful answers are cached in memory for their DNS
+TTL, at most five minutes; failures are not cached. Rule refresh uses foreign
+DoH for hostname resolution and HTTPS pinned to Wi-Fi. Failed foreign access
+does not fall back to Ethernet; domestic access remains independently available.
 
 The three externally maintained datasets are JSON from
 [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat), retained
@@ -79,8 +83,10 @@ The external datasets, Go and macOS retain their own authorship and licenses.
 
 The native service implements HTTP forwarding, CONNECT, WebSocket upgrades and
 SOCKS5 TCP CONNECT at `127.0.0.1:17890`. It runs as `nobody`, has a bounded
-client count, and is directly managed by the existing launchd job. There is no
-TLS interception, remote proxy node, TUN or route-table mutation. IPv6 proxy
+client count, and is directly managed by the existing launchd job. Tunnels
+close after five minutes without bytes in either direction, so one quiet
+direction does not cut a long download or upload. There is no TLS
+interception, remote proxy node, TUN or route-table mutation. IPv6 proxy
 destinations and SOCKS UDP are rejected. Non-proxy clients, WebRTC and existing
 direct connections are outside this proxy's enforcement; existing system
 bypass entries and DNS/IP guards are preserved.

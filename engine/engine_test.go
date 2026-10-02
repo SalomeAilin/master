@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -371,8 +372,13 @@ func TestHTTPForwardingPayloadAndHopHeaders(t *testing.T) {
 	}
 }
 
-func TestDoHUsesStandardDNSValidation(t *testing.T) {
+// dohServer answers each A query with 223.5.5.5 and the given TTL.
+func dohServer(t *testing.T, ttl uint32, queries *atomic.Int32) *httptest.Server {
+	t.Helper()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if queries != nil {
+			queries.Add(1)
+		}
 		query, _ := io.ReadAll(r.Body)
 		if len(query) < 17 {
 			t.Error("invalid DNS query")
@@ -392,15 +398,25 @@ func TestDoHUsesStandardDNSValidation(t *testing.T) {
 		binary.BigEndian.PutUint16(answer[2:4], 0x8180)
 		binary.BigEndian.PutUint16(answer[6:8], 1)
 		binary.BigEndian.PutUint16(answer[10:12], 0)
-		answer = append(answer, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 223, 5, 5, 5)
+		answer = append(answer, 0xc0, 0x0c, 0, 1, 0, 1)
+		answer = binary.BigEndian.AppendUint32(answer, ttl)
+		answer = append(answer, 0, 4, 223, 5, 5, 5)
 		w.Header().Set("Content-Type", "application/dns-message")
 		w.Write(answer)
 	}))
-	defer server.Close()
-	resolver := &net.Resolver{PreferGo: true, StrictErrors: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+	t.Cleanup(server.Close)
+	return server
+}
+
+func dohTestResolver(server *httptest.Server) *dohResolver {
+	return &dohResolver{resolver: &net.Resolver{PreferGo: true, StrictErrors: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return &dohStream{ctx: ctx, client: server.Client(), url: server.URL}, nil
-	}}
-	ips, err := resolver.LookupNetIP(context.Background(), "ip4", "fixture.invalid.")
+	}}}
+}
+
+func TestDoHUsesStandardDNSValidation(t *testing.T) {
+	server := dohServer(t, 0, nil)
+	ips, err := dohTestResolver(server).resolver.LookupNetIP(context.Background(), "ip4", "fixture.invalid.")
 	if err != nil || len(ips) != 1 || ips[0].String() != "223.5.5.5" {
 		t.Fatalf("DoH lookup: %v %v", ips, err)
 	}
@@ -411,6 +427,65 @@ func TestDoHUsesStandardDNSValidation(t *testing.T) {
 	stream.Close()
 	if _, err := stream.Read(make([]byte, 1)); err == nil {
 		t.Fatal("closed DNS stream readable")
+	}
+}
+
+func TestDoHCacheHonorsAnswerTTL(t *testing.T) {
+	for _, test := range []struct {
+		ttl     uint32
+		queries int32
+	}{{60, 1}, {86400, 1}, {0, 3}, {1 << 31, 3}} {
+		var queries atomic.Int32
+		d := dohTestResolver(dohServer(t, test.ttl, &queries))
+		for i := 0; i < 3; i++ {
+			ips, err := d.lookup(context.Background(), "fixture.test")
+			if err != nil || len(ips) != 1 || ips[0].String() != "223.5.5.5" {
+				t.Fatalf("ttl %d lookup: %v %v", test.ttl, ips, err)
+			}
+		}
+		if queries.Load() != test.queries {
+			t.Fatalf("ttl %d sent %d DoH queries, want %d", test.ttl, queries.Load(), test.queries)
+		}
+		if entry, ok := d.cache["fixture.test"]; ok && time.Until(entry.expires) > min(time.Duration(test.ttl)*time.Second, dnsCacheMaxTTL) {
+			t.Fatalf("ttl %d cached beyond its lifetime", test.ttl)
+		}
+	}
+	var queries atomic.Int32
+	d := dohTestResolver(dohServer(t, 60, &queries))
+	d.lookup(context.Background(), "fixture.test")
+	entry := d.cache["fixture.test"]
+	entry.expires = time.Now().Add(-time.Second)
+	d.cache["fixture.test"] = entry
+	if _, err := d.lookup(context.Background(), "fixture.test"); err != nil || queries.Load() != 2 {
+		t.Fatalf("expired answer reused: %v queries=%d", err, queries.Load())
+	}
+	ttl := &answerTTL{}
+	ttl.observe(time.Minute)
+	for i := 0; i < dnsCacheMaxEntries+10; i++ {
+		d.remember(fmt.Sprintf("host%d.test", i), []netip.Addr{netip.MustParseAddr("1.1.1.1")}, ttl)
+	}
+	if len(d.cache) > dnsCacheMaxEntries {
+		t.Fatalf("DNS cache grew to %d entries", len(d.cache))
+	}
+}
+
+func TestMinimumAnswerTTL(t *testing.T) {
+	header := []byte{0, 0, 0x81, 0x80, 0, 1, 0, 2, 0, 0, 0, 0}
+	question := []byte{1, 'a', 4, 't', 'e', 's', 't', 0, 0, 1, 0, 1}
+	cname := []byte{0xc0, 0x0c, 0, 5, 0, 1, 0, 0, 0, 30, 0, 8, 1, 'b', 4, 't', 'e', 's', 't', 0}
+	address := []byte{0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 1, 0x2c, 0, 4, 1, 2, 3, 4}
+	message := append(append(append(append([]byte{}, header...), question...), cname...), address...)
+	if ttl, ok := minimumAnswerTTL(message); !ok || ttl != 30*time.Second {
+		t.Fatalf("CNAME chain TTL: %v %v", ttl, ok)
+	}
+	if _, ok := minimumAnswerTTL(message[:len(message)-3]); ok {
+		t.Fatal("truncated answer accepted")
+	}
+	single := append(append([]byte{}, header...), question...)
+	single[7] = 1
+	single = append(single, 0xc0, 0x0c, 0, 1, 0, 1, 0x80, 0, 0, 0, 0, 4, 1, 2, 3, 4)
+	if ttl, ok := minimumAnswerTTL(single); !ok || ttl != 0 {
+		t.Fatalf("top-bit TTL must count as zero: %v %v", ttl, ok)
 	}
 }
 
@@ -453,6 +528,110 @@ func TestCleartextUpgradePreservesBufferedBytes(t *testing.T) {
 	data := make([]byte, 7)
 	if _, err := io.ReadFull(reader, data); err != nil || string(data) != "ws-data" {
 		t.Fatalf("upgrade payload: %q %v", data, err)
+	}
+}
+
+func tcpPair(t *testing.T) (net.Conn, net.Conn) {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, _ := listener.Accept()
+		accepted <- c
+	}()
+	dialed, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := <-accepted
+	if peer == nil {
+		t.Fatal("accept failed")
+	}
+	t.Cleanup(func() { dialed.Close(); peer.Close() })
+	return dialed, peer
+}
+
+func TestRelayQuietDirectionDoesNotEndActiveTransfer(t *testing.T) {
+	for _, download := range []bool{true, false} {
+		client, clientSide := tcpPair(t)
+		upstreamSide, upstream := tcpPair(t)
+		relayed := make(chan struct{})
+		go func() {
+			relayWithLimits(clientSide, clientSide, upstreamSide, 500*time.Millisecond, 2*time.Second)
+			close(relayed)
+		}()
+		sender, receiver := upstream, client
+		if !download {
+			sender, receiver = client, upstream
+		}
+		reply := make(chan string, 1)
+		go func() { data, _ := io.ReadAll(sender); reply <- string(data) }()
+		// The quiet direction stays silent for twice the idle limit.
+		for i := 0; i < 20; i++ {
+			if _, err := sender.Write([]byte("chunk\n")); err != nil {
+				t.Fatalf("download=%v: transfer cut after %d chunks: %v", download, i, err)
+			}
+			select {
+			case data := <-reply:
+				t.Fatalf("download=%v: quiet side ended after %d chunks (%q)", download, i, data)
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+		sender.(*net.TCPConn).CloseWrite()
+		receiver.SetDeadline(time.Now().Add(3 * time.Second))
+		received, err := io.ReadAll(receiver)
+		if err != nil || len(received) != 20*len("chunk\n") {
+			t.Fatalf("download=%v: received %d bytes: %v", download, len(received), err)
+		}
+		// The half-closed side still receives the other side's final bytes.
+		receiver.Write([]byte("done"))
+		receiver.Close()
+		select {
+		case data := <-reply:
+			if data != "done" {
+				t.Fatalf("download=%v: reply after half-close %q", download, data)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("download=%v: reply after half-close lost", download)
+		}
+		select {
+		case <-relayed:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("download=%v: relay did not finish", download)
+		}
+	}
+}
+
+func TestRelayClosesIdleAndLingeringTunnels(t *testing.T) {
+	client, clientSide := tcpPair(t)
+	upstreamSide, upstream := tcpPair(t)
+	started := time.Now()
+	go relayWithLimits(clientSide, clientSide, upstreamSide, 200*time.Millisecond, time.Hour)
+	for _, side := range []net.Conn{client, upstream} {
+		side.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if _, err := side.Read(make([]byte, 1)); err != io.EOF {
+			t.Fatalf("idle tunnel not closed: %v", err)
+		}
+	}
+	if time.Since(started) < 200*time.Millisecond {
+		t.Fatal("tunnel closed before the idle limit")
+	}
+	client, clientSide = tcpPair(t)
+	upstreamSide, upstream = tcpPair(t)
+	go relayWithLimits(clientSide, clientSide, upstreamSide, time.Hour, 200*time.Millisecond)
+	client.(*net.TCPConn).CloseWrite()
+	upstream.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := upstream.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("half-close not forwarded: %v", err)
+	}
+	started = time.Now()
+	client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := client.Read(make([]byte, 1)); err != io.EOF || time.Since(started) > 2*time.Second {
+		t.Fatalf("silent side not closed after the linger limit: %v", err)
 	}
 }
 

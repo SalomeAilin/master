@@ -11,7 +11,7 @@ import (
 	"syscall"
 )
 
-const version = "0.1.0-independent"
+const version = "0.1.1-independent"
 
 func command(arguments []string) error {
 	if len(arguments) == 0 {

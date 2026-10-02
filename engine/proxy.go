@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -180,15 +181,7 @@ func (e *engine) http(w http.ResponseWriter, request *http.Request) {
 		if err = buffer.Flush(); err != nil {
 			return
 		}
-		done := make(chan struct{})
-		go func() {
-			io.Copy(body, &idleReader{Reader: buffer.Reader, connection: client})
-			body.Close()
-			close(done)
-		}()
-		io.Copy(&idleWriter{Writer: client, connection: client}, body)
-		client.Close()
-		<-done
+		relay(client, buffer.Reader, body)
 		return
 	}
 	stripHopHeaders(response.Header)
@@ -250,46 +243,86 @@ func (e *engine) connectHTTP(w http.ResponseWriter, request *http.Request, id ui
 	relay(client, buffer.Reader, upstream)
 }
 
-func relay(client net.Conn, reader io.Reader, upstream net.Conn) {
-	readClient := &idleReader{Reader: reader, connection: client}
-	writeClient := &idleWriter{Writer: client, connection: client}
-	readUpstream := &idleReader{Reader: upstream, connection: upstream}
-	writeUpstream := &idleWriter{Writer: upstream, connection: upstream}
-	done := make(chan struct{})
-	go func() {
-		io.Copy(writeUpstream, readClient)
-		if half, ok := upstream.(interface{ CloseWrite() error }); ok {
-			half.CloseWrite()
+// A tunnel closes after relayIdle without bytes in either direction. After one
+// side finishes sending, the other side has relayLinger to send again.
+const (
+	relayIdle   = 5 * time.Minute
+	relayLinger = 30 * time.Second
+)
+
+func relay(client net.Conn, reader io.Reader, upstream io.ReadWriteCloser) {
+	relayWithLimits(client, reader, upstream, relayIdle, relayLinger)
+}
+
+// Idleness is measured across both directions, so a quiet request side never
+// ends a response that is still streaming, or the reverse. Only a real end of
+// stream is forwarded as a half-close; errors and idle expiry close both sides.
+func relayWithLimits(client net.Conn, reader io.Reader, upstream io.ReadWriteCloser, idle, linger time.Duration) {
+	moved := &activity{start: time.Now()}
+	var closing sync.Once
+	closeBoth := func() { closing.Do(func() { client.Close(); upstream.Close() }) }
+	defer closeBoth()
+	ended := make(chan bool, 2)
+	pump := func(destination io.Writer, source io.Reader) {
+		_, err := io.Copy(destination, &activityReader{Reader: source, moved: moved})
+		if half, ok := destination.(interface{ CloseWrite() error }); ok && err == nil && half.CloseWrite() == nil {
+			ended <- true
+			return
 		}
-		upstream.SetReadDeadline(time.Now().Add(30 * time.Second))
-		close(done)
-	}()
-	io.Copy(writeClient, readUpstream)
-	if half, ok := client.(interface{ CloseWrite() error }); ok {
-		half.CloseWrite()
+		closeBoth()
+		ended <- false
 	}
-	client.SetReadDeadline(time.Now().Add(30 * time.Second))
-	<-done
+	go pump(upstream, reader)
+	go pump(client, upstream)
+	timer := time.NewTimer(idle)
+	defer timer.Stop()
+	expired := timer.C
+	halfClosed := time.Duration(-1)
+	for running := 2; running > 0; {
+		select {
+		case clean := <-ended:
+			running--
+			if running == 0 || !clean {
+				continue
+			}
+			halfClosed = moved.elapsed()
+		case <-expired:
+		}
+		if expired == nil {
+			continue
+		}
+		since, limit := time.Duration(moved.last.Load()), idle
+		if halfClosed >= since {
+			since, limit = halfClosed, linger
+		}
+		if wait := limit - (moved.elapsed() - since); wait > 0 {
+			timer.Reset(wait)
+			continue
+		}
+		closeBoth()
+		expired = nil
+	}
 }
 
-type idleReader struct {
+// activity records when bytes last moved, on the monotonic clock.
+type activity struct {
+	start time.Time
+	last  atomic.Int64
+}
+
+func (a *activity) elapsed() time.Duration { return time.Since(a.start) }
+
+type activityReader struct {
 	io.Reader
-	connection net.Conn
+	moved *activity
 }
 
-func (r *idleReader) Read(p []byte) (int, error) {
-	r.connection.SetReadDeadline(time.Now().Add(5 * time.Minute))
-	return r.Reader.Read(p)
-}
-
-type idleWriter struct {
-	io.Writer
-	connection net.Conn
-}
-
-func (w *idleWriter) Write(p []byte) (int, error) {
-	w.connection.SetWriteDeadline(time.Now().Add(5 * time.Minute))
-	return w.Writer.Write(p)
+func (r *activityReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if n > 0 {
+		r.moved.last.Store(int64(r.moved.elapsed()))
+	}
+	return n, err
 }
 
 func (e *engine) socks(ctx context.Context, client net.Conn) {
