@@ -73,6 +73,22 @@ proxy kept its upstream connection open for the full 400-second test; under
 connection about 80 seconds later. These checks do not establish long-term
 playback stability.
 
+Version `0.1.2-independent` replaced only the binary on 2026-10-02 at 21:46
+(+08:00), installed by the Go deployment tool's `upgrade` action. It
+revalidates the rule datasets with ETags, so unchanged data is no longer
+downloaded again every hour. Afterwards Douyin and Bilibili used Ethernet and
+GitHub used Wi-Fi.
+
+Wi-Fi is a metered mobile hotspot. On 2026-10-02 the measured background use of
+it was about 113 MB a day: about 78 MB from status-page probes every five
+minutes, which downloaded the 230 KB Anthropic console page each time; about
+29 MB from a separate one-minute keepalive monitor; and about 5.5 MB from
+hourly rule downloads. The status page outside this repository now probes
+with header-only requests and no longer fetches the console. The duplicate
+keepalive LaunchAgent is disabled, with its files kept. Together with rule
+revalidation, this brings the expected background use to about 7 MB a day.
+New background probes over Wi-Fi should stay header-only and infrequent.
+
 New connections use protected foreign domains, local domestic overrides,
 maintained foreign domains, then maintained domestic domains. Known domain
 decisions precede DNS resolution, so CDN location does not override them.
