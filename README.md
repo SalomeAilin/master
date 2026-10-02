@@ -50,9 +50,16 @@ and cache, current upstream source tree and optional client references were
 removed after acceptance. Original commits remain in Git history, and the
 former [license notice](archive/sing-box-LICENSE) is retained unchanged.
 DNS, route guards, macOS proxy settings and bypass entries were preserved.
-The takeover ran `0.1.0-independent`. Version `0.1.1-independent` adds a
-TTL-bounded DNS cache and ends tunnels only when both directions are idle;
-installing it requires administrator authorization.
+The takeover ran `0.1.0-independent`. Version `0.1.1-independent` replaced only
+the binary on 2026-10-02 at 12:50 (+08:00), using the staged `upgrade` action.
+It caches DNS answers for their TTL and ends tunnels only when both directions
+are idle. Afterwards Douyin, Bilibili, Youku, Baidu Netdisk and CSDN used
+Ethernet, and GitHub and Claude used Wi-Fi. Repeated GitHub CONNECTs took
+about 270 ms instead of 515-647 ms. A 60 KB/s HTTP/1.1 download through the
+proxy kept its upstream connection open for the full 400-second test; under
+`0.1.0` the engine sent a FIN at five minutes and the server closed the
+connection about 80 seconds later. These checks do not establish long-term
+playback stability.
 
 New connections use protected foreign domains, local domestic overrides,
 maintained foreign domains, then maintained domestic domains. Known domain
