@@ -27,6 +27,11 @@ former Python address policy, DNS event agent, configuration builder and
 deployment tool were ported to `engine/cmd/` after their decisions and output
 were compared with the originals. Root services therefore no longer run an
 interpreter that an administrator account can modify without authentication.
+The Go programs were installed on 2026-10-02 at 21:25 (+08:00) with
+`scripts/deploy-security-update.zsh`. Afterwards the DNS event agent ran the Go
+binary and logged its 58 suffixes, the route guard and China routes exited
+cleanly with the new policy program, `/usr/local/sbin` held no Python, and the
+status page reported OK.
 
 Run Go checks from `engine/` and the shell checks from the repository root:
 
