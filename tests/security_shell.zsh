@@ -4,7 +4,11 @@ cd "${0:A:h}/.."
 
 # Exercise the real Go policy with repository address lists, never the live router.
 work=$(mktemp -d "${TMPDIR:-/tmp}/network-policy-test.XXXXXXXX")
-trap 'rm -rf "$work"' EXIT
+cleanup() {
+  (( ZSH_SUBSHELL == 0 )) || return 0
+  rm -rf "$work"
+}
+trap cleanup EXIT ZERR
 (cd engine && go build -o "$work/network-split-policy" ./cmd/network-split-policy)
 policy_check() {
   "$work/network-split-policy" -policy-file config/china_ip_list.txt -policy-file config/domestic_extra_routes.txt "$@"
@@ -55,6 +59,81 @@ checked=()
 check_domestic_domain unavailable.cn
 [[ ${#checked} = 0 ]]
 print 'PASS failed policy helper cannot trigger route lookups or repairs'
+
+# Run the real recovery functions in isolation; never execute the live guard.
+(
+  recovery_calls="$work/dns-recovery-calls"
+  DNSMASQ_BIN="$work/fixed-dnsmasq"
+  DNSMASQ_CONFIG="$work/dnsmasq.conf"
+  DNSMASQ_CELLAR_DIR="$work/cellar"
+  DNSMASQ_LABEL=test.dnsmasq
+  mkdir -p "$DNSMASQ_CELLAR_DIR/test/sbin"
+  cp /usr/bin/true "$DNSMASQ_CELLAR_DIR/test/sbin/dnsmasq"
+  log() { :; }
+  mock_stat() { [[ $metadata != fail ]] || return 1; print -r -- "$metadata"; }
+  mock_install() { print imported >> "$recovery_calls"; /bin/cp "$DNSMASQ_CELLAR_DIR/test/sbin/dnsmasq" "$DNSMASQ_BIN"; }
+  mock_dnsmasq() { print -r -- "test $*" >> "$recovery_calls"; return "$config_result"; }
+  route_error_text() { print -r -- "$*"; }
+  kickstart_system_service() { print -r -- "restart $*" >> "$recovery_calls"; }
+  dnsmasq_running() { [[ $running = yes ]]; }
+  dnsmasq_responds() { probes=$((probes + 1)); [[ $responding = yes ]]; }
+  body=$(sed -n '/^ensure_dnsmasq_binary() {/,/^}/p' scripts/network-split-guard.sh)
+  body=${body//\/usr\/bin\/stat/mock_stat}
+  eval "${body//\/usr\/bin\/install/mock_install}"
+  body=$(sed -n '/^dnsmasq_config_ok() {/,/^}/p' scripts/network-split-guard.sh)
+  eval "${body//\"\$DNSMASQ_BIN\" --test/mock_dnsmasq --test}"
+  eval "$(sed -n '/^ensure_dnsmasq() {/,/^}/p' scripts/network-split-guard.sh)"
+  body=$(sed -n '/^ensure_dns_responds() {/,/^}/p' scripts/network-split-guard.sh)
+  eval "${body//\/bin\/sleep/:}"
+  running=no
+  responding=no
+  config_result=0
+  for scenario in missing nonexecutable symlink directory user_owned writable metadata_failure; do
+    rm -rf "$DNSMASQ_BIN"
+    : > "$recovery_calls"
+    metadata='0:0:555'
+    case $scenario in
+      missing) ;;
+      directory) mkdir "$DNSMASQ_BIN" ;;
+      symlink) ln -s "$DNSMASQ_CELLAR_DIR/test/sbin/dnsmasq" "$DNSMASQ_BIN" ;;
+      *) cp /usr/bin/true "$DNSMASQ_BIN"; chmod 555 "$DNSMASQ_BIN" ;;
+    esac
+    case $scenario in
+      nonexecutable) chmod 444 "$DNSMASQ_BIN" ;;
+      user_owned) metadata='501:20:555' ;;
+      writable) metadata='0:0:777' ;;
+      metadata_failure) metadata=fail ;;
+    esac
+    if ensure_dnsmasq; then print -u2 "unsafe recovery accepted: $scenario"; exit 1; fi
+    probes=0
+    if ensure_dns_responds; then exit 1; fi
+    [[ $probes = 3 && ! -s "$recovery_calls" ]]
+  done
+  rm -rf "$DNSMASQ_BIN"
+  cp /usr/bin/true "$DNSMASQ_BIN"
+  chmod 555 "$DNSMASQ_BIN"
+  metadata='0:0:555'
+  : > "$recovery_calls"
+  ensure_dnsmasq
+  expected="test --test --conf-file=$DNSMASQ_CONFIG
+restart restart $DNSMASQ_LABEL"
+  [[ "$(<$recovery_calls)" = "$expected" ]]
+  : > "$recovery_calls"
+  probes=0
+  if ensure_dns_responds; then exit 1; fi
+  [[ $probes = 3 && "$(<$recovery_calls)" = "$expected" ]]
+  : > "$recovery_calls"
+  config_result=1
+  if ensure_dnsmasq; then exit 1; fi
+  [[ "$(<$recovery_calls)" = "test --test --conf-file=$DNSMASQ_CONFIG" ]]
+  : > "$recovery_calls"
+  running=yes
+  responding=yes
+  ensure_dnsmasq
+  ensure_dns_responds
+  [[ ! -s "$recovery_calls" ]]
+)
+print 'PASS DNS recovery refuses untrusted binaries and preserves bounded trusted restarts'
 
 # Route coordination stays under root-only paths, and the query log stays private.
 china=$(<scripts/china-route.sh)

@@ -16,14 +16,14 @@ import (
 	"network-owned-engine/internal/deploy"
 )
 
-const usage = "usage: network-domain-proxy-deploy install|upgrade|enable|rollback|install-tool|install-health-maintenance|health-check|backups|inspect-backup <path>|remove-backup <path>|residues|cleanup-residues|cleanup-health-state"
+const usage = "usage: network-domain-proxy-deploy install|upgrade|enable|rollback|install-tool|install-route-guard|install-health-maintenance|health-check|backups|inspect-backup <path>|remove-backup <path>|residues|cleanup-residues|cleanup-health-state"
 
 func validArguments(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	switch args[0] {
-	case "install", "upgrade", "enable", "rollback", "install-tool", "install-health-maintenance", "health-check", "backups", "residues", "cleanup-residues", "cleanup-health-state":
+	case "install", "upgrade", "enable", "rollback", "install-tool", "install-route-guard", "install-health-maintenance", "health-check", "backups", "residues", "cleanup-residues", "cleanup-health-state":
 		return len(args) == 1
 	case "inspect-backup", "remove-backup":
 		return len(args) == 2
@@ -110,6 +110,8 @@ func run(d *deploy.Deployer, args ...string) error {
 		err = d.RemoveBackup(args[1])
 	case "install-tool":
 		err = d.InstallTool()
+	case "install-route-guard":
+		err = d.InstallRouteGuard()
 	case "install-health-maintenance":
 		err = d.InstallHealthMaintenance()
 	case "residues":

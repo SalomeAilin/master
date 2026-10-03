@@ -151,15 +151,19 @@ func (d *Deployer) Residues() ([]Residue, error) {
 
 // Match zsystem flock's POSIX fcntl lock, not the proxy's BSD flock lock.
 func (d *Deployer) lockHealthState() (func(), error) {
-	fd, err := syscall.Open(d.HealthLock, syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	return lockState(d.HealthLock)
+}
+
+func lockState(path string) (func(), error) {
+	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	file := os.NewFile(uintptr(fd), d.HealthLock)
+	file := os.NewFile(uintptr(fd), path)
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || int(info.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
 		file.Close()
-		return nil, errors.New("unsafe health state lock")
+		return nil, errors.New("unsafe state lock")
 	}
 	lock := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0}
 	if err := syscall.FcntlFlock(uintptr(fd), syscall.F_SETLK, &lock); err != nil {

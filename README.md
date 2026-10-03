@@ -40,6 +40,27 @@ Run Go checks from `engine/` and the shell checks from the repository root:
 zsh tests/security_shell.zsh
 ```
 
+GitHub Actions runs the Go race tests, vet, offline integration and all four
+existing zsh regression suites on macOS for pushes to `main` and pull requests.
+The workflow pins Go 1.26.8 and action commits, uses a read-only token, and
+does not deploy or run live-network integration checks. Its results cover
+repository regressions, not production routing or playback quality.
+
+The DNS route guard never restores executables from Homebrew automatically.
+Before a configuration test or guard-requested restart, the fixed dnsmasq path
+must be an executable regular file, not a symlink, with `root:wheel:555`
+ownership/mode. A missing or unsafe binary requires an authorized reinstall;
+the guard logs the failure and continues protecting the routing policy.
+The executable's parent directories, DNS configuration and launchd definition
+remain administrator-controlled deployment prerequisites. This gate is not
+a cryptographic provenance check and does not change launchd's own restart path.
+For a guard-only update, stage the tested `network-domain-proxy-deploy` binary
+beside `network-split-guard.sh` and authorize its `install-route-guard` action.
+It checks syntax without executing the guard, holds the existing guard lock,
+publishes atomically, and checks hashes and core service PIDs. Failure restores
+the prior file; temporary recovery material is removed after success or a
+successful rollback. It does not run the broader security-update installer.
+
 To generate proxy configuration, run
 `(cd engine && go run ./cmd/network-domain-proxy-config /path/to/staging/config.json)`,
 replacing `/path/to/staging` with an existing private staging directory. The tool

@@ -17,7 +17,7 @@ func TestCommandArgumentsRejectImplicitOrBatchDeletion(t *testing.T) {
 			t.Fatal("accepted", args)
 		}
 	}
-	for _, args := range [][]string{{"health-check"}, {"upgrade"}, {"install-tool"}, {"install-health-maintenance"}, {"residues"}, {"cleanup-residues"}, {"cleanup-health-state"}, {"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}} {
+	for _, args := range [][]string{{"health-check"}, {"upgrade"}, {"install-tool"}, {"install-route-guard"}, {"install-health-maintenance"}, {"residues"}, {"cleanup-residues"}, {"cleanup-health-state"}, {"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}} {
 		if !validArguments(args) {
 			t.Fatal("rejected", args)
 		}
@@ -54,7 +54,7 @@ func TestBackupCommandsRespectDeploymentLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}, {"install-tool"}, {"install-health-maintenance"}, {"cleanup-residues"}, {"cleanup-health-state"}} {
+	for _, args := range [][]string{{"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}, {"install-tool"}, {"install-route-guard"}, {"install-health-maintenance"}, {"cleanup-residues"}, {"cleanup-health-state"}} {
 		if err := run(d, args...); err == nil {
 			t.Fatal("ignored active deployment", args)
 		}

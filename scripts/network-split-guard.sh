@@ -16,7 +16,6 @@ FOREIGN_BLOCK_HIGH_SAMPLE="208.67.222.222"
 DNSMASQ_LABEL="homebrew.mxcl.dnsmasq"
 DNSMASQ_BIN="/usr/local/sbin/dnsmasq-network-split"
 DNSMASQ_CONFIG="/usr/local/etc/dnsmasq-network-split.conf"
-DNSMASQ_CELLAR_DIR="/opt/homebrew/Cellar/dnsmasq"
 CHINA_ROUTE_LABEL="com.local.china-route"
 EXTRA_ROUTE_LIST="/usr/local/etc/domestic_extra_routes.txt"
 DOMESTIC_DOMAIN_LIST="/usr/local/etc/domestic_domains.conf"
@@ -53,26 +52,14 @@ ensure_dns() {
 }
 
 ensure_dnsmasq_binary() {
-  if [ -x "$DNSMASQ_BIN" ]; then
+  # Never promote a user-controlled package-manager binary into a root service.
+  # The installer owns the fixed path and its root-controlled parent directory.
+  if [ -f "$DNSMASQ_BIN" ] && [ ! -L "$DNSMASQ_BIN" ] && [ -x "$DNSMASQ_BIN" ] &&
+    [ "$(/usr/bin/stat -f '%u:%g:%Lp' "$DNSMASQ_BIN" 2>/dev/null)" = "0:0:555" ]; then
     return 0
   fi
 
-  candidate=""
-  for path in "$DNSMASQ_CELLAR_DIR"/*/sbin/dnsmasq(N); do
-    candidate="$path"
-  done
-
-  if [ -z "$candidate" ]; then
-    log "dnsmasq binary missing path=$DNSMASQ_BIN cellar=$DNSMASQ_CELLAR_DIR"
-    return 1
-  fi
-
-  if /usr/bin/install -o root -g wheel -m 555 "$candidate" "$DNSMASQ_BIN" >/dev/null 2>&1 && [ -x "$DNSMASQ_BIN" ]; then
-    log "restored fixed dnsmasq binary source=$candidate target=$DNSMASQ_BIN"
-    return 0
-  fi
-
-  log "failed to restore fixed dnsmasq binary source=$candidate target=$DNSMASQ_BIN"
+  log "dnsmasq binary missing or unsafe path=$DNSMASQ_BIN; administrator reinstallation required; automatic import refused"
   return 1
 }
 
