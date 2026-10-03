@@ -1,23 +1,42 @@
-// Command network-domain-proxy-deploy installs, upgrades, enables or rolls back
-// the independent proxy. Run the staged copy as administrator: install and
+// Command network-domain-proxy-deploy manages the independent proxy and its
+// backups. Run the staged copy as administrator: install and
 // upgrade read their inputs from the directory holding this program.
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"sync/atomic"
 	"syscall"
 
 	"network-owned-engine/internal/deploy"
 )
 
+const usage = "usage: network-domain-proxy-deploy install|upgrade|enable|rollback|install-tool|backups|inspect-backup <path>|remove-backup <path>"
+
+func validArguments(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "install", "upgrade", "enable", "rollback", "install-tool", "backups":
+		return len(args) == 1
+	case "inspect-backup", "remove-backup":
+		return len(args) == 2
+	}
+	return false
+}
+
 func main() {
-	if len(os.Args) != 2 || !slices.Contains([]string{"install", "upgrade", "enable", "rollback"}, os.Args[1]) {
-		fmt.Fprintln(os.Stderr, "usage: network-domain-proxy-deploy install|upgrade|enable|rollback")
+	if len(os.Args) == 2 && (os.Args[1] == "--help" || os.Args[1] == "-h") {
+		fmt.Println(usage)
+		return
+	}
+	if !validArguments(os.Args[1:]) {
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
 	if os.Geteuid() != 0 {
@@ -45,25 +64,44 @@ func main() {
 		}
 	}()
 	d.Interrupted = interrupted.Load
-	if err := run(d, os.Args[1]); err != nil {
+	if err := run(d, os.Args[1:]...); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(d *deploy.Deployer, action string) error {
+func run(d *deploy.Deployer, args ...string) error {
+	if !validArguments(args) {
+		return fmt.Errorf("%s", usage)
+	}
 	release, err := d.Lock()
 	if err != nil {
 		return err
 	}
 	defer release()
-	switch action {
+	switch args[0] {
 	case "install", "upgrade":
-		_, err = d.Upgrade(action == "install")
+		_, err = d.Upgrade(args[0] == "install")
 	case "enable":
 		err = d.Enable()
-	default:
+	case "rollback":
 		err = d.Rollback()
+	case "backups":
+		var backups []deploy.Backup
+		backups, err = d.Backups()
+		if err == nil {
+			err = json.NewEncoder(d.Out).Encode(backups)
+		}
+	case "inspect-backup":
+		var backup deploy.Backup
+		backup, err = d.InspectBackup(args[1])
+		if err == nil {
+			err = json.NewEncoder(d.Out).Encode(backup)
+		}
+	case "remove-backup":
+		err = d.RemoveBackup(args[1])
+	case "install-tool":
+		err = d.InstallTool()
 	}
 	return err
 }

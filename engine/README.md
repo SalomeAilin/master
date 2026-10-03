@@ -40,7 +40,7 @@ The module also holds the rest of the system's programs, so no root or
 | `cmd/network-split-policy` | Address policy for the zsh route guards: one address sets the exit status; standard input is filtered to authorized addresses |
 | `cmd/network-split-dns-event-route-agent` | Root daemon that tails dnsmasq's query log and binds authorized domestic answers to Ethernet; `-check` verifies its inputs |
 | `cmd/network-domain-proxy-config` | Writes the engine configuration from `config/` |
-| `cmd/network-domain-proxy-deploy` | Transactional `install`, `upgrade`, `enable` and `rollback` |
+| `cmd/network-domain-proxy-deploy` | Transactional deployment, tool-only installation and explicit backup inspection/removal |
 | `cmd/network-domain-proxy-evidence` | Read-only live egress evidence |
 
 Shared code is in `internal/`: `policy`, `dnsobserver`, `proxyconfig` and
@@ -49,6 +49,11 @@ Shared code is in `internal/`: `policy`, `dnsobserver`, `proxyconfig` and
 Generate a configuration into an existing private staging directory with
 `go run ./cmd/network-domain-proxy-config <config-path>`.
 The engine accepts `check -c <path>`, `run -c <path>` and `version`.
+The installed deployment tool accepts `backups`, `inspect-backup <exact-path>`
+and `remove-backup <exact-path>` for administrator-authorized maintenance.
+`install-tool` updates only that executable. The backup and CLI tests cover
+path/manifest validation, occupied files, changed state, deployment locking,
+preservation of other backups, and tool-only installation failure.
 Private native logs use `--log-file`, `--log-max-size` and
 `--log-max-backups`. The service defaults to one 2 MiB active file and three
 numbered archives. Oversized entries are marked and bounded; an old oversized

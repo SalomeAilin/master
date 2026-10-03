@@ -172,6 +172,38 @@ settings once and enables the loopback proxy. The `rollback` action restores
 those settings; it does not restore a previous engine binary. Do not stop a
 proxy while browsers still point at it.
 
+### Backup Maintenance
+
+Use the existing Go deployment tool for backup maintenance, with administrator
+authorization:
+
+| Action | Result |
+| --- | --- |
+| `network-domain-proxy-deploy backups` | List backup metadata and report unrecognized contents without deleting anything |
+| `network-domain-proxy-deploy inspect-backup <exact-path>` | Validate and hash one backup without displaying configuration contents |
+| `network-domain-proxy-deploy remove-backup <exact-path>` | Remove only that reviewed backup and verify unchanged service PIDs and installed-file hashes |
+
+Both manifest-based proxy acceptance backups and the known flat installation
+backup format are supported. Select an exact name or direct-child path under
+the backup directory; wildcards, batch deletion, symlinks, hard links,
+unexpected entries and mismatched manifests are rejected. Inspection identifies
+the backup format, not whether its recovery data is still needed. Deletion
+discards the local rollback copy and requires an explicit command.
+
+Maintenance shares the proxy deployment lock. Deletion also refuses an active
+security installer, open backup files, unavailable occupancy checks, stopped
+services or changes detected during validation. It uses Go filesystem APIs and
+direct calls to the macOS service/process tools, without generating cleanup
+scripts or running an interpreter. It does not download web pages or restart
+services. A failure after deletion is reported separately from a refusal before
+deletion; unexpected new files are left in place rather than recursively removed.
+
+To update only this maintenance tool, build `./cmd/network-domain-proxy-deploy`
+using the build flags above, then run the staged executable with `install-tool`
+and administrator authorization. It uses the existing atomic installer and
+checks that only the tool hash changed; engine, DNS and observer PIDs stay the
+same. No rule/configuration staging or proxy upgrade is needed.
+
 ### Verification
 
 `go test -race ./...` from `engine/` covers protocol forwarding, rule

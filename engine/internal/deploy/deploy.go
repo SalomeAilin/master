@@ -754,13 +754,7 @@ func (d *Deployer) Upgrade(fresh bool) (string, error) {
 	if err := d.checkInterrupted(); err != nil {
 		return "", err
 	}
-	targets := []string{d.Binary, d.Config, d.Plist, d.Tool}
-	for _, name := range RuleNames {
-		targets = append(targets, filepath.Join(d.Rules, name+".json"))
-	}
-	for _, name := range RuleNames {
-		targets = append(targets, filepath.Join(d.Cache, name+".json"))
-	}
+	targets := d.snapshotTargets()
 	var created []string
 	for _, directory := range []string{d.Rules, d.Cache, d.LogDir} {
 		if _, err := os.Lstat(directory); errors.Is(err, fs.ErrNotExist) {
