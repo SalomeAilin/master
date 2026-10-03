@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,14 @@ import (
 )
 
 func TestCommandArgumentsRejectImplicitOrBatchDeletion(t *testing.T) {
+	for _, args := range [][]string{{"cleanup-policy-cache"}, {"cleanup-policy-cache", "/arbitrary/path"}, {"cleanup-policy-cache", strings.Repeat("g", 64)}, {"cleanup-policy-cache", strings.Repeat("a", 64), "extra"}} {
+		if validArguments(args) {
+			t.Fatal("unsafe cache command accepted", args)
+		}
+	}
+	if !validArguments([]string{"cleanup-policy-cache", strings.Repeat("a", 64)}) {
+		t.Fatal("reviewed cache digest rejected")
+	}
 	for _, args := range [][]string{nil, {"remove-backup"}, {"remove-backup", "one", "two"}, {"remove-backup", "--all", "one"}, {"backups", "one"}, {"cleanup-residues", "arbitrary-path"}, {"unknown"}, {"rollback", "one"}} {
 		if validArguments(args) {
 			t.Fatal("accepted", args)
@@ -54,7 +63,7 @@ func TestBackupCommandsRespectDeploymentLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}, {"install-tool"}, {"install-route-guard"}, {"install-health-maintenance"}, {"cleanup-residues"}, {"cleanup-health-state"}} {
+	for _, args := range [][]string{{"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}, {"install-tool"}, {"install-route-guard"}, {"install-health-maintenance"}, {"cleanup-residues"}, {"cleanup-health-state"}, {"cleanup-policy-cache", strings.Repeat("a", 64)}} {
 		if err := run(d, args...); err == nil {
 			t.Fatal("ignored active deployment", args)
 		}

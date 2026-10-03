@@ -245,6 +245,15 @@ removes eligible files after checking ownership, type, contents, age and open
 file use. The active health state, unrelated files, links, unrecognized data,
 recent writes and nonempty legacy DNS state are preserved.
 
+For the retired Python address-policy cache only, review its contents, references
+and SHA-256 first, then explicitly authorize `cleanup-policy-cache <sha256>`.
+This Go maintenance action accepts no path or wildcard: it checks the fixed
+legacy bytecode name beneath `sbin/__pycache__`, requires the old source to be
+absent, refuses links, unreviewed entries, occupied files and changed contents,
+then removes the verified file and its empty directory without recursion.
+Runtime PIDs and installed-file hashes must remain unchanged. This action is
+manual, not part of any scheduled health or cleanup job.
+
 The health job definition directly runs `network-split-health`, a dedicated
 one-shot executable. It imports the shared health and read-only runtime-check
 packages, not the deployment package, and accepts no installation/deletion

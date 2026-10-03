@@ -16,7 +16,7 @@ import (
 	"network-owned-engine/internal/deploy"
 )
 
-const usage = "usage: network-domain-proxy-deploy install|upgrade|enable|rollback|install-tool|install-route-guard|install-health-maintenance|health-check|backups|inspect-backup <path>|remove-backup <path>|residues|cleanup-residues|cleanup-health-state"
+const usage = "usage: network-domain-proxy-deploy install|upgrade|enable|rollback|install-tool|install-route-guard|install-health-maintenance|health-check|backups|inspect-backup <path>|remove-backup <path>|residues|cleanup-residues|cleanup-health-state|cleanup-policy-cache <sha256>"
 
 func validArguments(args []string) bool {
 	if len(args) == 0 {
@@ -27,6 +27,8 @@ func validArguments(args []string) bool {
 		return len(args) == 1
 	case "inspect-backup", "remove-backup":
 		return len(args) == 2
+	case "cleanup-policy-cache":
+		return len(args) == 2 && deploy.ValidPolicyCacheDigest(args[1])
 	}
 	return false
 }
@@ -122,6 +124,8 @@ func run(d *deploy.Deployer, args ...string) error {
 		}
 	case "cleanup-residues", "cleanup-health-state":
 		err = d.CleanupResidues(args[0] == "cleanup-health-state")
+	case "cleanup-policy-cache":
+		err = d.CleanupPolicyCache(args[1])
 	}
 	return err
 }

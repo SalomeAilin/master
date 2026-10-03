@@ -3,16 +3,137 @@ package deploy
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func policyCacheFixture(t *testing.T) (*Deployer, string, string) {
+	t.Helper()
+	d := maintenanceFixture(t)
+	dir := filepath.Join(filepath.Dir(d.Tool), "__pycache__")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("reviewed retired policy bytecode fixture")
+	file := filepath.Join(dir, policyCacheName)
+	if err := os.WriteFile(file, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	return d, file, hex.EncodeToString(digest[:])
+}
+
+func TestPolicyCacheCleanupIsExactAndIdempotent(t *testing.T) {
+	d, file, digest := policyCacheFixture(t)
+	before, err := d.maintenanceState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := d.CleanupPolicyCache(digest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Dir(file)); !os.IsNotExist(err) {
+		t.Fatal("cache retained", err)
+	}
+	after, err := d.maintenanceState()
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("runtime changed", err)
+	}
+}
+
+func TestPolicyCacheCleanupPreservesUnsafeOrChangedInputs(t *testing.T) {
+	for _, variant := range []string{"digest", "malformed-digest", "source", "extra", "symlink", "directory-link", "hardlink", "writable", "writable-directory", "oversized", "occupied", "probe-failure", "running", "changed-file", "changed-directory", "changed-runtime", "interrupted"} {
+		t.Run(variant, func(t *testing.T) {
+			d, file, digest := policyCacheFixture(t)
+			dir := filepath.Dir(file)
+			must := func(err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch variant {
+			case "digest":
+				digest = strings.Repeat("0", 64)
+			case "malformed-digest":
+				digest = "not-a-digest"
+			case "source":
+				writeTestFile(t, filepath.Join(filepath.Dir(d.Tool), "network_split_policy.py"), "still in use")
+			case "extra":
+				writeTestFile(t, filepath.Join(dir, "other.pyc"), "keep")
+			case "symlink":
+				must(os.Remove(file))
+				must(os.Symlink(d.Binary, file))
+			case "directory-link":
+				must(os.Rename(dir, dir+".moved"))
+				must(os.Symlink(dir+".moved", dir))
+			case "hardlink":
+				must(os.Link(file, filepath.Join(filepath.Dir(d.Tool), "keep")))
+			case "writable":
+				must(os.Chmod(file, 0o666))
+			case "writable-directory":
+				must(os.Chmod(dir, 0o777))
+			case "oversized":
+				writeTestFile(t, file, strings.Repeat("x", (64<<10)+1))
+			}
+			original := d.Run
+			d.Run = func(args ...string) (string, error) {
+				if args[0] == "/usr/bin/pgrep" && variant == "running" {
+					return "123\n", nil
+				}
+				if args[0] == "/usr/sbin/lsof" {
+					switch variant {
+					case "occupied":
+						return "123\n", nil
+					case "probe-failure":
+						return "permission denied", &CommandError{Args: args, Code: 1}
+					case "changed-file":
+						writeTestFile(t, file, "changed")
+					case "changed-directory":
+						must(os.Rename(dir, dir+".moved"))
+						must(os.Mkdir(dir, 0o755))
+						writeTestFile(t, file, "reviewed retired policy bytecode fixture")
+					case "changed-runtime":
+						writeTestFile(t, d.Binary, "changed runtime")
+					}
+				}
+				return original(args...)
+			}
+			d.Interrupted = func() bool { return variant == "interrupted" }
+			if err := d.CleanupPolicyCache(digest); err == nil {
+				t.Fatal("unsafe cleanup admitted")
+			}
+			if _, err := os.Lstat(file); err != nil {
+				t.Fatal("cache removed despite refusal", err)
+			}
+		})
+	}
+}
+
+func TestPolicyCacheCleanupHandlesOnlyAnEmptyRetiredDirectory(t *testing.T) {
+	d, file, digest := policyCacheFixture(t)
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CleanupPolicyCache(digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Dir(file)); !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
 
 func makeResidue(t *testing.T, d *Deployer, name, content string, old bool) string {
 	t.Helper()
