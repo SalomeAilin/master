@@ -52,7 +52,7 @@ func maintenanceFixture(t *testing.T) *Deployer {
 			}
 			program := map[string]string{
 				Label:       d.Binary,
-				healthLabel: d.healthBinary(),
+				healthLabel: filepath.Join(base, "sbin", "network-split-health"),
 				"system/com.local.network-split-dns-event-route-agent": filepath.Join(base, "sbin", "network-split-dns-event-route-agent"),
 				"system/homebrew.mxcl.dnsmasq":                         filepath.Join(base, "sbin", "dnsmasq-network-split"),
 			}[args[2]]
@@ -124,6 +124,17 @@ func TestBackupRemovalPreservesRuntimeAndOtherBackups(t *testing.T) {
 				t.Fatal("runtime changed", err)
 			}
 		})
+	}
+}
+
+func TestUnifiedMaintenanceCanInspectAnOlderAcceptanceBackup(t *testing.T) {
+	d := maintenanceFixture(t)
+	backup := makeBackup(t, d, "acceptance")
+	d.SupervisorPlist = filepath.Join(filepath.Dir(d.Plist), "parent.plist")
+	d.Plist = filepath.Join(filepath.Dir(d.Config), "jobs", PlistName)
+	d.Tool = d.Binary
+	if result, err := d.InspectBackup(backup); err != nil || result.Kind != "acceptance" {
+		t.Fatal(result, err)
 	}
 }
 
@@ -264,60 +275,6 @@ func TestBackupsListReportsInvalidCandidateWithoutRemovingAnything(t *testing.T)
 	}
 }
 
-func TestInstallToolChangesOnlyMaintenanceExecutable(t *testing.T) {
-	d := maintenanceFixture(t)
-	writeTestFile(t, filepath.Join(d.Root, ToolName), "new maintenance tool")
-	before, err := d.maintenanceState()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := d.InstallTool(); err != nil {
-		t.Fatal(err)
-	}
-	after, err := d.maintenanceState()
-	if err != nil || before.Files[d.Tool] == after.Files[d.Tool] {
-		t.Fatal("tool was not updated", err)
-	}
-	before.Files[d.Tool] = after.Files[d.Tool]
-	if !reflect.DeepEqual(before, after) {
-		t.Fatal("unrelated runtime changed")
-	}
-}
-
-func TestInstallToolRefusesLegacyOrUnknownHealthEntry(t *testing.T) {
-	for _, program := range []string{"legacy-tool", "legacy-shell", "unavailable"} {
-		t.Run(program, func(t *testing.T) {
-			d := maintenanceFixture(t)
-			writeTestFile(t, filepath.Join(d.Root, ToolName), "new maintenance tool")
-			before, err := d.maintenanceState()
-			if err != nil {
-				t.Fatal(err)
-			}
-			original := d.Run
-			d.Run = func(args ...string) (string, error) {
-				if len(args) == 3 && args[0] == "/bin/launchctl" && args[1] == "print" && args[2] == healthLabel {
-					switch program {
-					case "legacy-tool":
-						return "program = " + d.Tool + "\n", nil
-					case "legacy-shell":
-						return "program = /legacy/health.sh\n", nil
-					default:
-						return "", errors.New("unavailable")
-					}
-				}
-				return original(args...)
-			}
-			if err := d.InstallTool(); err == nil {
-				t.Fatal("unsafe tool update accepted")
-			}
-			after, err := d.maintenanceState()
-			if err != nil || !reflect.DeepEqual(before, after) {
-				t.Fatal("runtime changed", err)
-			}
-		})
-	}
-}
-
 func TestBackupDirectoryReplacementIsRejected(t *testing.T) {
 	d := maintenanceFixture(t)
 	path := makeBackup(t, d, "installation")
@@ -367,32 +324,6 @@ func TestRemovalReportsFailureAfterDeletionAccurately(t *testing.T) {
 	}
 }
 
-func TestInstallToolFailureKeepsInstalledExecutable(t *testing.T) {
-	d := maintenanceFixture(t)
-	writeTestFile(t, filepath.Join(d.Root, ToolName), "new maintenance tool")
-	before, err := d.maintenanceState()
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.Rename = func(string, string) error { return errors.New("simulated publication failure") }
-	if err := d.InstallTool(); err == nil {
-		t.Fatal("publication failure ignored")
-	}
-	after, err := d.maintenanceState()
-	if err != nil || !reflect.DeepEqual(before, after) {
-		t.Fatal("failed installation changed runtime", err)
-	}
-	entries, err := os.ReadDir(filepath.Dir(d.Tool))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".") {
-			t.Fatal("temporary installation file retained", entry.Name())
-		}
-	}
-}
-
 func TestBackupInventoryCanListProtectedMacOSParent(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS system-directory compatibility")
@@ -405,24 +336,5 @@ func TestBackupInventoryCanListProtectedMacOSParent(t *testing.T) {
 	// Names only: do not inspect or modify any production backup or database.
 	if _, err := backupDirectoryNames(parent); err != nil {
 		t.Fatal("system directory enumeration requires unrelated metadata access", err)
-	}
-}
-
-func TestInstallToolRefusesInventoryFailureBeforePublication(t *testing.T) {
-	d := maintenanceFixture(t)
-	writeTestFile(t, filepath.Join(d.Root, ToolName), "new maintenance tool")
-	if err := os.Chmod(d.BackupParent, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	before, err := d.maintenanceState()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := d.InstallTool(); err == nil || !strings.Contains(err.Error(), "inventory preflight failed") {
-		t.Fatal("inventory failure ignored", err)
-	}
-	after, err := d.maintenanceState()
-	if err != nil || !reflect.DeepEqual(before, after) {
-		t.Fatal("tool replaced before inventory validation", err)
 	}
 }

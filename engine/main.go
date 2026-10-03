@@ -11,11 +11,16 @@ import (
 	"syscall"
 )
 
-const version = "0.1.2-independent"
+const version = "0.2.0-unified"
 
 func command(arguments []string) error {
-	if len(arguments) == 0 {
-		return errors.New("usage: network-domain-engine run|check|version")
+	if len(arguments) == 0 || len(arguments) == 1 && (arguments[0] == "--help" || arguments[0] == "-h") {
+		fmt.Println("network-domain-engine: status | evidence | config | prepare-service | check-service | upgrade | maintenance | version")
+		fmt.Println("The installed service manages its workers; do not start worker copies manually.")
+		return nil
+	}
+	if handled, err := applicationCommand(arguments); handled {
+		return err
 	}
 	if arguments[0] == "version" {
 		fmt.Println("network-domain-engine", version)

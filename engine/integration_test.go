@@ -2,7 +2,7 @@
 
 // Integration tests run the compiled engine end to end with isolated fixtures:
 // CLI flags, private log rotation, signal handling, rule hot updates and cached
-// restart. TestLiveFailClosed also uses the real network and runs only with
+// restart. The live tests also use the real network and run only with
 // NETWORK_SPLIT_LIVE=1. Run with: go test -tags integration -run Integration .
 package main
 
@@ -385,5 +385,90 @@ func TestIntegrationLiveFailClosed(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(root, "output.log"))
 	if !strings.Contains(string(data), "no such network interface") {
 		t.Fatalf("%s", data)
+	}
+}
+
+func TestIntegrationLiveRoutesUseTheirInterfaceAddresses(t *testing.T) {
+	if os.Getenv("NETWORK_SPLIT_LIVE") != "1" {
+		t.Skip("set NETWORK_SPLIT_LIVE=1 to use the real network")
+	}
+	seeds := os.Getenv("NETWORK_SPLIT_RULES")
+	if seeds == "" {
+		seeds = proxyconfig.RulesDirectory
+	}
+	root := t.TempDir()
+	c := candidateConfig(t, seeds, filepath.Join(root, "cache"))
+	path, logPath := filepath.Join(root, "config.json"), filepath.Join(root, "output.log")
+	writeJSON(t, path, c)
+	output, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	command, exited := launchEngine(t, []string{"run", "-c", path}, output)
+	defer stopEngine(t, command, exited)
+	waitFor(t, "listener", func() bool {
+		conn, err := net.DialTimeout("tcp", c.Listen, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+		}
+		return err == nil
+	})
+	proxy, _ := url.Parse("http://" + c.Listen)
+	transport := &http.Transport{Proxy: http.ProxyURL(proxy)}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
+	for _, test := range []struct{ host, kind, iface string }{{"www.douyin.com", "domestic", c.Domestic.Interface}, {"github.com", "foreign", c.Foreign.Interface}} {
+		start := time.Now()
+		response, err := client.Head("https://" + test.host + "/")
+		if err != nil {
+			t.Fatal(test.host, err)
+		}
+		response.Body.Close()
+		if response.TLS == nil || len(response.TLS.VerifiedChains) == 0 {
+			t.Fatal("TLS certificate not verified")
+		}
+		device, err := net.InterfaceByName(test.iface)
+		if err != nil {
+			t.Fatal(err)
+		}
+		addresses, err := device.Addrs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var id any
+		verified := false
+		for _, line := range strings.Split(string(data), "\n") {
+			var event map[string]any
+			if json.Unmarshal([]byte(line), &event) != nil {
+				continue
+			}
+			if event["event"] == "route" && event["target"] == test.host+":443" {
+				if event["interface"] != test.iface || event["outbound"] != test.kind {
+					t.Fatal("wrong route decision", event)
+				}
+				id = event["id"]
+			}
+			if id != nil && event["id"] == id && event["event"] == "connected" {
+				source, _, err := net.SplitHostPort(fmt.Sprint(event["source"]))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, address := range addresses {
+					ip, _, err := net.ParseCIDR(address.String())
+					if err == nil && ip.String() == source {
+						verified = true
+					}
+				}
+			}
+		}
+		if !verified {
+			t.Fatal(test.host, "connected socket address did not belong to the required interface")
+		}
+		t.Logf("%s: %s interface=%s source_verified=true elapsed=%s", test.host, response.Status, test.iface, time.Since(start).Round(time.Millisecond))
 	}
 }

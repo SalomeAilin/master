@@ -23,10 +23,18 @@ type State struct {
 func Inspect(d Paths, run func(...string) (string, error)) (State, error) {
 	state := State{PIDs: map[string]int{}, Files: map[string]string{}}
 	sbin := filepath.Dir(d.Tool)
+	unified := d.Tool != "" && d.Tool == d.Binary
+	if unified {
+		sbin = filepath.Join(filepath.Dir(filepath.Dir(d.Binary)), "sbin")
+	}
 	services := map[string]string{
 		ProxyLabel: d.Binary,
 		"system/com.local.network-split-dns-event-route-agent": filepath.Join(sbin, "network-split-dns-event-route-agent"),
 		"system/homebrew.mxcl.dnsmasq":                         filepath.Join(sbin, "dnsmasq-network-split"),
+	}
+	if unified {
+		services["system/com.local.network-split-dns-event-route-agent"] = d.Binary
+		services["system/"+ServiceLabel] = d.Binary
 	}
 	for label, program := range services {
 		details, err := run("/bin/launchctl", "print", label)
@@ -51,22 +59,33 @@ func Inspect(d Paths, run func(...string) (string, error)) (State, error) {
 		filepath.Join(filepath.Dir(d.Config), "dnsmasq-network-split.conf"),
 		filepath.Join(filepath.Dir(d.Plist), "com.local.network-split-dns-event-route-agent.plist"),
 		filepath.Join(filepath.Dir(d.Plist), HealthPlistName)}
-	for _, name := range []string{"network-split-policy", "network-split-dns-event-route-agent", "dnsmasq-network-split", "china-route.sh", "network-split-guard.sh"} {
+	names := []string{"network-split-policy", "network-split-dns-event-route-agent", "dnsmasq-network-split", "china-route.sh", "network-split-guard.sh"}
+	if unified {
+		names = []string{"dnsmasq-network-split"}
+		files = append(files, d.ServiceConfig, d.SupervisorPlist)
+		for _, name := range []string{"homebrew.mxcl.dnsmasq", "com.local.china-route", "com.local.network-split-guard", "com.local.network-split-log-guard"} {
+			files = append(files, filepath.Join(filepath.Dir(d.Plist), name+".plist"))
+		}
+	}
+	for _, name := range names {
 		files = append(files, filepath.Join(sbin, name))
 	}
 	legacy := filepath.Join(sbin, LegacyHealthScript)
-	if _, err := os.Lstat(legacy); err == nil {
+	if _, err := os.Lstat(legacy); err == nil && !unified {
 		files = append(files, legacy)
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return state, err
 	}
 	health := filepath.Join(sbin, HealthBinaryName)
-	if _, err := os.Lstat(health); err == nil {
+	if _, err := os.Lstat(health); err == nil && !unified {
 		files = append(files, health)
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return state, err
 	}
 	for _, path := range files {
+		if _, hashed := state.Files[path]; hashed {
+			continue
+		}
 		fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 		if err != nil {
 			return state, err

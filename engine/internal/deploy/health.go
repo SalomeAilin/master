@@ -1,35 +1,54 @@
 package deploy
 
 import (
+	"errors"
 	"fmt"
-	"path/filepath"
-
 	"network-owned-engine/internal/healthcheck"
+	"os"
+	"path/filepath"
+	"time"
 )
 
 const healthLabel = "system/com.local.network-split-domestic-health"
 const healthPlistName = "com.local.network-split-domestic-health.plist"
 
-func (d *Deployer) healthRunner() *healthcheck.Runner {
-	return &healthcheck.Runner{StatePath: filepath.Join(d.BackupParent, healthState),
-		LogPath: d.HealthLog, ConfigPath: d.Config, Now: d.Now, Run: d.Run}
-}
-
 func (d *Deployer) healthJob() *healthcheck.Job {
 	return &healthcheck.Job{Paths: d.Paths, Context: d.Context, Out: d.Out, Run: d.Run, Now: d.Now, Interrupted: d.checkInterrupted}
 }
 
-func (d *Deployer) preflightHealth() error {
-	if d.PreflightHealth != nil {
-		return d.PreflightHealth()
+func (d *Deployer) previousHealthProbe() int64 {
+	state, err := healthcheck.Read(filepath.Join(d.BackupParent, healthState), d.Now().Unix())
+	if err != nil {
+		return 0
 	}
-	outcome := d.healthRunner().Check(d.Context)
-	if !outcome.Healthy {
-		if outcome.Err != nil {
-			return fmt.Errorf("native health preflight failed: %s (HTTP %d): %w", outcome.Reason, outcome.Status, outcome.Err)
+	return state.LastProbe
+}
+
+func (d *Deployer) acceptHealthSample(previous int64) error {
+	for attempt := 0; attempt < 31; attempt++ {
+		state, err := healthcheck.Read(filepath.Join(d.BackupParent, healthState), d.Now().Unix())
+		if err == nil {
+			if state.LastProbe > 0 && state.LastProbe != previous && state.Failures == 0 {
+				fmt.Fprintf(d.Out, "Scheduled native health probe accepted: last_probe=%d failures=0\n", state.LastProbe)
+				return nil
+			}
 		}
-		return fmt.Errorf("native health preflight failed: %s (HTTP %d)", outcome.Reason, outcome.Status)
+		if err := d.checkInterrupted(); err != nil {
+			return err
+		}
+		if attempt < 30 {
+			d.Sleep(5 * time.Second)
+		}
 	}
-	fmt.Fprintf(d.Out, "Native Go health probe accepted: HTTP %d, %d ms, wired route verified\n", outcome.Status, outcome.ElapsedMS)
-	return nil
+	return errors.New("native scheduled health probe was not accepted within 150 seconds")
+}
+
+func fileDigest(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	digest, _, err := hashFile(file)
+	return digest, err
 }

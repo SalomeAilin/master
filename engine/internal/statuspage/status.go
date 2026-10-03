@@ -60,6 +60,7 @@ func ParseRoute(raw string) Route {
 
 type Collector struct {
 	Etc, Sbin, Launchd string
+	ObserverProgram    string
 	Run                func(context.Context, ...string) (string, error)
 	Lookup             func(context.Context, string) ([]netip.Addr, error)
 	HTTP               func(context.Context, string, string) (string, bool)
@@ -244,7 +245,11 @@ func (c *Collector) Collect(ctx context.Context) Report {
 				}
 			}
 		}
-		add(label, values["state"], err == nil && values["state"] == "running" && values["program"] == filepath.Join(c.Sbin, program))
+		expected := filepath.Join(c.Sbin, program)
+		if label == "com.local.network-split-dns-event-route-agent" && c.ObserverProgram != "" {
+			expected = c.ObserverProgram
+		}
+		add(label, values["state"], err == nil && values["state"] == "running" && values["program"] == expected)
 	}
 	for _, service := range []string{"Wi-Fi", "Ethernet"} {
 		out, err := c.Run(ctx, "/usr/sbin/networksetup", "-getdnsservers", service)

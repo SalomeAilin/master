@@ -1,6 +1,5 @@
-// Package deploy installs the independent proxy transactionally. It proves a
-// staged candidate in isolation, snapshots the live files only after the old
-// engine has exited, and restores them if activation fails.
+// Package deploy migrates and upgrades the unified service transactionally.
+// Candidates are checked in isolation before stopping installed workers.
 package deploy
 
 import (
@@ -15,7 +14,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -60,29 +58,27 @@ type Record struct {
 // Deployer holds the target paths and every system interaction. Tests replace
 // these fields; nil step overrides use the real implementations.
 type Deployer struct {
+	preflightOnly bool
+	userFiles     *ownedUserFiles
+	unifiedLayout *unifiedLayout
+	acceptUnified func(serviceConfigPath string, previous int64) error
 	Paths
-	Context         context.Context
-	PreflightHealth func() error
-	AcceptHealth    func(int64) error
-	Root            string // staging directory holding the new files
-	Out             io.Writer
-	Run             func(args ...string) (string, error)
-	ProcessAlive    func(pid int) (bool, error)
-	Sleep           func(time.Duration)
-	Now             func() time.Time
-	Dial            func(address string, timeout time.Duration) (io.Closer, error)
-	Chown           func(path string, uid, gid uint32) error
-	Rename          func(oldpath, newpath string) error
-	Interrupted     func() bool
+	Context      context.Context
+	Root         string // staging directory holding the new files
+	Out          io.Writer
+	Run          func(args ...string) (string, error)
+	ProcessAlive func(pid int) (bool, error)
+	Sleep        func(time.Duration)
+	Now          func() time.Time
+	Dial         func(address string, timeout time.Duration) (io.Closer, error)
+	Chown        func(path string, uid, gid uint32) error
+	Rename       func(oldpath, newpath string) error
+	Interrupted  func() bool
 
-	ValidateStage func() (map[string]any, error)
-	Preflight     func(config map[string]any) error
-	Snapshot      func(backup string, targets []string) ([]Record, error)
-	Restore       func(backup string, records []Record) error
-	EnsureDir     func(path string, mode os.FileMode, owner string) error
-	StopService   func() error
-	StopCandidate func() error
-	StartService  func() error
+	Preflight func(config map[string]any) error
+	Snapshot  func(backup string, targets []string) ([]Record, error)
+	Restore   func(backup string, records []Record) error
+	EnsureDir func(path string, mode os.FileMode, owner string) error
 }
 
 func New(paths Paths, root string, out io.Writer) *Deployer {
@@ -145,83 +141,6 @@ func (d *Deployer) Lock() (func(), error) {
 		return nil, err
 	}
 	return func() { file.Close() }, nil
-}
-
-func (d *Deployer) startService() error {
-	if d.StartService != nil {
-		return d.StartService()
-	}
-	// launchd can still be removing a booted-out job when bootstrap first runs.
-	for attempt := 0; ; attempt++ {
-		_, err := d.Run("/bin/launchctl", "bootstrap", "system", d.Plist)
-		if code, ok := exitCode(err); err == nil || !ok || code != 5 || attempt == 9 {
-			return err
-		}
-		d.Sleep(500 * time.Millisecond)
-	}
-}
-
-func (d *Deployer) stopService() error {
-	if d.StopService != nil {
-		return d.StopService()
-	}
-	details, err := d.Run("/bin/launchctl", "print", Label)
-	if err != nil {
-		return err
-	}
-	pid, found := 0, false
-	for _, line := range strings.Split(details, "\n") {
-		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "pid = "); ok {
-			if pid, err = strconv.Atoi(strings.TrimSpace(value)); err != nil {
-				return err
-			}
-			found = true
-			break
-		}
-	}
-	if _, err := d.Run("/bin/launchctl", "bootout", Label); err != nil {
-		return err
-	}
-	if !found {
-		return nil
-	}
-	waitErr := d.waitForExit(pid)
-	if waitErr == nil {
-		return nil
-	}
-	// bootout already removed the job; retain its unchanged registration.
-	if err := d.startService(); err != nil {
-		return fmt.Errorf("service stop failed and registration recovery failed; live files remain unchanged: %w", err)
-	}
-	return waitErr
-}
-
-func (d *Deployer) waitForExit(pid int) error {
-	deadline := d.Now().Add(15 * time.Second)
-	for d.Now().Before(deadline) {
-		alive, err := d.ProcessAlive(pid)
-		if err != nil {
-			return err
-		}
-		if !alive {
-			return nil
-		}
-		d.Sleep(100 * time.Millisecond)
-	}
-	return errors.New("service is still exiting; live files were not replaced")
-}
-
-func (d *Deployer) stopCandidate() error {
-	if d.StopCandidate != nil {
-		return d.StopCandidate()
-	}
-	if _, err := d.Run("/bin/launchctl", "print", Label); err != nil {
-		if code, ok := exitCode(err); ok && code == 113 {
-			return nil // not loaded
-		}
-		return err
-	}
-	return d.stopService()
 }
 
 type proxySettings map[string]map[string]map[string]string
@@ -331,82 +250,6 @@ func (d *Deployer) InstallFile(source, target string, mode os.FileMode) error {
 		return err
 	}
 	return d.Rename(temporary.Name(), target)
-}
-
-// Arguments are the only accepted launchd program arguments.
-func (d *Deployer) Arguments() []string {
-	return []string{d.Binary, "run", "--disable-color", "--log-file", filepath.Join(d.LogDir, "service.log"),
-		"--log-max-size", "2097152", "--log-max-backups", "3", "-c", d.Config}
-}
-
-func (d *Deployer) readPlist(path string) (map[string]any, error) {
-	output, err := d.Run("/usr/bin/plutil", "-convert", "json", "-o", "-", path)
-	if err != nil {
-		return nil, err
-	}
-	var plist map[string]any
-	if err := json.Unmarshal([]byte(output), &plist); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	return plist, nil
-}
-
-func (d *Deployer) validateStage() (map[string]any, error) {
-	if d.ValidateStage != nil {
-		return d.ValidateStage()
-	}
-	data, err := os.ReadFile(filepath.Join(d.Root, "config.json"))
-	if err != nil {
-		return nil, err
-	}
-	var config map[string]any
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, err
-	}
-	domestic, _ := config["domestic"].(map[string]any)
-	foreign, _ := config["foreign"].(map[string]any)
-	if config["version"] != float64(1) || config["listen"] != "127.0.0.1:17890" || config["cache_directory"] != d.Cache ||
-		domestic["interface"] != "en0" || foreign["interface"] != "en1" {
-		return nil, errors.New("unexpected independent production configuration")
-	}
-	sources, _ := config["rule_sources"].([]any)
-	kinds := map[string]bool{}
-	for _, item := range sources {
-		source, _ := item.(map[string]any)
-		kind, _ := source["kind"].(string)
-		url, _ := source["url"].(string)
-		kinds[kind] = true
-		if source["seed"] != filepath.Join(d.Rules, kind+".json") || source["interval"] != "1h" || !strings.HasPrefix(url, "https://") {
-			return nil, errors.New("unexpected independent rule source")
-		}
-	}
-	if len(sources) != len(RuleNames) || len(kinds) != len(RuleNames) || !kinds["domestic"] || !kinds["foreign"] || !kinds["china"] {
-		return nil, errors.New("unexpected independent rule source")
-	}
-	candidate, err := d.readPlist(filepath.Join(d.Root, PlistName))
-	if err != nil {
-		return nil, err
-	}
-	var arguments []any
-	for _, argument := range d.Arguments() {
-		arguments = append(arguments, argument)
-	}
-	if candidate["Label"] != strings.TrimPrefix(Label, "system/") || candidate["UserName"] != "nobody" ||
-		!reflect.DeepEqual(candidate["ProgramArguments"], arguments) || candidate["KeepAlive"] != true || candidate["RunAtLoad"] != true {
-		return nil, errors.New("unexpected independent service definition")
-	}
-	if _, err := os.Stat(d.Plist); err == nil {
-		previous, err := d.readPlist(d.Plist)
-		if err != nil {
-			return nil, err
-		}
-		delete(previous, "ProgramArguments")
-		delete(candidate, "ProgramArguments")
-		if !reflect.DeepEqual(previous, candidate) {
-			return nil, errors.New("service settings other than engine arguments would change")
-		}
-	}
-	return config, nil
 }
 
 func (d *Deployer) preflight(config map[string]any) error {
@@ -553,6 +396,14 @@ func (d *Deployer) snapshot(backup string, targets []string) ([]Record, error) {
 func (d *Deployer) snapshotFiles(backup string, targets []string) ([]Record, error) {
 	var records []Record
 	for index, target := range targets {
+		if d.userFiles != nil && d.userFiles.has(target) {
+			record, err := d.userFiles.snapshot(backup, index, target)
+			if err != nil {
+				return nil, err
+			}
+			records = append(records, record)
+			continue
+		}
 		record := Record{Target: target, Copy: strconv.Itoa(index)}
 		info, err := os.Lstat(target)
 		switch {
@@ -625,6 +476,12 @@ func (d *Deployer) restore(backup string, records []Record) error {
 
 func (d *Deployer) restoreFiles(backup string, records []Record) error {
 	for _, record := range records {
+		if d.userFiles != nil && d.userFiles.has(record.Target) {
+			if err := d.userFiles.restore(backup, record); err != nil {
+				return err
+			}
+			continue
+		}
 		if record.Present {
 			if err := d.InstallFile(filepath.Join(backup, record.Copy), record.Target, unixMode(record.Mode)); err != nil {
 				return err
@@ -681,140 +538,6 @@ func (d *Deployer) checkInterrupted() error {
 		return errors.New("deployment interrupted")
 	}
 	return nil
-}
-
-// Upgrade installs the staged engine, configuration, seeds, service definition
-// and this tool. On failure after the live service stopped it restores every
-// snapshotted file and restarts the previous service; a failed rollback keeps
-// its private backup and reports where it is.
-func (d *Deployer) Upgrade(fresh bool) (string, error) {
-	if fresh {
-		if _, err := os.Lstat(d.Plist); err == nil {
-			return "", errors.New("service already installed")
-		}
-	} else {
-		details, err := d.Run("/bin/launchctl", "print", Label)
-		if err != nil {
-			return "", err
-		}
-		current := ""
-		for _, line := range strings.Split(details, "\n") {
-			if value, ok := strings.CutPrefix(strings.TrimSpace(line), "program = "); ok {
-				current = strings.TrimSpace(value)
-				break
-			}
-		}
-		if current != d.Binary {
-			return "", errors.New("unexpected active proxy program")
-		}
-	}
-	config, err := d.validateStage()
-	if err != nil {
-		return "", err
-	}
-	if err := d.preflight(config); err != nil {
-		return "", err
-	}
-	if err := d.checkInterrupted(); err != nil {
-		return "", err
-	}
-	targets := d.snapshotTargets()
-	var created []string
-	for _, directory := range []string{d.Rules, d.Cache, d.LogDir} {
-		if _, err := os.Lstat(directory); errors.Is(err, fs.ErrNotExist) {
-			created = append(created, directory)
-		}
-	}
-	backup, err := os.MkdirTemp(d.BackupParent, "network-domain-independent-backup.")
-	if err != nil {
-		return "", err
-	}
-	var records []Record
-	stopped, changed := fresh, false
-	err = func() error {
-		// Cache snapshots are taken only after the previous writer has exited.
-		if !fresh {
-			if err := d.stopService(); err != nil {
-				return err
-			}
-			stopped = true
-		}
-		var err error
-		if records, err = d.snapshot(backup, targets); err != nil {
-			return err
-		}
-		changed = true
-		for _, directory := range []struct {
-			path  string
-			mode  os.FileMode
-			owner string
-		}{{d.Rules, 0o755, "root"}, {d.Cache, 0o700, "nobody"}, {d.LogDir, 0o700, "nobody"}} {
-			if err := d.ensureDirectory(directory.path, directory.mode, directory.owner); err != nil {
-				return err
-			}
-		}
-		for _, name := range RuleNames {
-			if err := d.InstallFile(filepath.Join(d.Root, name+".json"), filepath.Join(d.Rules, name+".json"), 0o644); err != nil {
-				return err
-			}
-		}
-		for _, file := range []struct {
-			source, target string
-			mode           os.FileMode
-		}{{EngineName, d.Binary, 0o755}, {"config.json", d.Config, 0o644}, {PlistName, d.Plist, 0o644}, {ToolName, d.Tool, 0o755}} {
-			if err := d.InstallFile(filepath.Join(d.Root, file.source), file.target, file.mode); err != nil {
-				return err
-			}
-		}
-		if err := d.checkInterrupted(); err != nil {
-			return err
-		}
-		if err := d.startService(); err != nil {
-			return err
-		}
-		if err := d.health(ProxyPort); err != nil {
-			return err
-		}
-		details, err := d.Run("/bin/launchctl", "print", Label)
-		if err != nil {
-			return err
-		}
-		if !strings.Contains(details, "program = "+d.Binary) || !strings.Contains(details, "state = running") {
-			return errors.New("launchd is not running the independent engine")
-		}
-		return d.checkInterrupted()
-	}()
-	if err == nil {
-		fmt.Fprintln(d.Out, "Independent engine active. Acceptance backup:", backup)
-		return backup, nil
-	}
-	if stopped {
-		rollbackErr := func() error {
-			if changed {
-				if err := d.stopCandidate(); err != nil {
-					return err
-				}
-				if err := d.restore(backup, records); err != nil {
-					return err
-				}
-				for i := len(created) - 1; i >= 0; i-- {
-					if err := os.Remove(created[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
-						return err
-					}
-				}
-			}
-			if !fresh {
-				return d.startService()
-			}
-			return nil
-		}()
-		if rollbackErr != nil {
-			fmt.Fprintln(d.Out, "Rollback incomplete; recovery backup retained:", backup)
-			return "", fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
-		}
-	}
-	os.RemoveAll(backup)
-	return "", err
 }
 
 // Enable points the macOS HTTP and HTTPS proxies at the engine after a health

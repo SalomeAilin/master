@@ -29,11 +29,18 @@ func ExitCode(err error) (int, bool) {
 }
 
 func Run(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	return RunContext(context.Background(), 30*time.Second, args...)
+}
+
+func RunContext(ctx context.Context, limit time.Duration, args ...string) (string, error) {
+	if len(args) == 0 {
+		return "", errors.New("missing command")
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
 	if ctx.Err() != nil {
-		return string(output), fmt.Errorf("%s timed out", strings.Join(args, " "))
+		return string(output), fmt.Errorf("%s: %w", strings.Join(args, " "), ctx.Err())
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {

@@ -4,6 +4,7 @@ package runtimecheck
 
 // Paths are the installed locations the deployment manages.
 type Paths struct {
+	ServiceConfig, SupervisorPlist                                               string
 	HealthLog                                                                    string
 	State, Plist, Config, Binary, Tool, Rules, Cache, LogDir, Lock, BackupParent string
 	HealthLock                                                                   string
@@ -29,4 +30,18 @@ const (
 	HealthPlistName    = "com.local.network-split-domestic-health.plist"
 	LegacyHealthScript = "network-split-domestic-health.sh"
 	HealthBinaryName   = "network-split-health"
+	ServiceLabel       = "com.local.network-split-service"
+	ServiceConfigPath  = "/usr/local/etc/network-split-service.json"
+	JobsDirectory      = "/usr/local/etc/network-split-jobs"
 )
+
+// Unified uses one executable; worker plists are registered by the parent job,
+// not discovered independently in LaunchDaemons at boot.
+func Unified() Paths {
+	p := Production
+	p.Tool = p.Binary
+	p.Plist = JobsDirectory + "/com.local.network-domain-proxy.plist"
+	p.ServiceConfig = ServiceConfigPath
+	p.SupervisorPlist = "/Library/LaunchDaemons/" + ServiceLabel + ".plist"
+	return p
+}

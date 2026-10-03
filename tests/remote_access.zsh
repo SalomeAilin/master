@@ -13,15 +13,7 @@ eval "$(sed -n -E '/^(ssh_dir|sshd_dropin|marker)=/p' scripts/deploy-remote-acce
 grep -qx 'Include /etc/ssh/sshd_config.d/\*' /etc/ssh/sshd_config
 print 'PASS drop-in carries the marker, is included and precedes 100-macos.conf'
 
-# Without pf, SSH replies rely on the Wi-Fi-loss reject routes being gateway
-# routes: XNU scoped lookups skip lo0 routes only when they carry RTF_GATEWAY.
-eval "$(sed -n -E '/^FOREIGN_BLOCK_GW=/p' scripts/network-split-guard.sh)"
-block_routes=$(sed -n '/^ensure_foreign_block_routes() {/,/^}/p' scripts/network-split-guard.sh)
-[[ $FOREIGN_BLOCK_GW = 127.0.0.1 ]]
-[[ $block_routes == *'route -n add -net 0.0.0.0/1 "$FOREIGN_BLOCK_GW" -reject'* ]]
-[[ $block_routes == *'route -n add -net 128.0.0.0/1 "$FOREIGN_BLOCK_GW" -reject'* ]]
-[[ $block_routes != *-interface* && $block_routes != *-iface* ]]
-print 'PASS Wi-Fi-loss reject routes stay gateway routes that scoped SSH replies bypass'
+# The native routing tests verify gateway reject routes for scoped SSH replies.
 
 if env -u REMOTE_ACCESS_SSH_DIR zsh scripts/deploy-remote-access.zsh status >/dev/null 2>&1; then
   fail 'the real /etc/ssh must require administrator rights'

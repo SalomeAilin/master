@@ -15,10 +15,12 @@ import (
 	"syscall"
 
 	"network-owned-engine/internal/runtimecheck"
+	"network-owned-engine/internal/service"
 )
 
 const acceptancePrefix = "network-domain-independent-backup."
 const installationPrefix = "network-split-backup."
+const unifiedPrefix = "network-unified-backup."
 
 var installationFiles = []string{
 	"china-route.sh", "network-split-guard.sh", "network-split-policy",
@@ -39,7 +41,12 @@ type Backup struct {
 }
 
 func (d *Deployer) snapshotTargets() []string {
-	targets := []string{d.Binary, d.Config, d.Plist, d.Tool}
+	plist, tool := d.Plist, d.Tool
+	if d.Tool == d.Binary {
+		plist = filepath.Join(filepath.Dir(d.SupervisorPlist), PlistName)
+		tool = filepath.Join(filepath.Dir(filepath.Dir(d.Binary)), "sbin", ToolName)
+	}
+	targets := []string{d.Binary, d.Config, plist, tool}
 	for _, directory := range []string{d.Rules, d.Cache} {
 		for _, name := range RuleNames {
 			targets = append(targets, filepath.Join(directory, name+".json"))
@@ -49,7 +56,7 @@ func (d *Deployer) snapshotTargets() []string {
 }
 
 func backupKind(name string) string {
-	for prefix, kind := range map[string]string{acceptancePrefix: "acceptance", installationPrefix: "installation"} {
+	for prefix, kind := range map[string]string{acceptancePrefix: "acceptance", installationPrefix: "installation", unifiedPrefix: "unified"} {
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
@@ -111,8 +118,9 @@ func (d *Deployer) inspectBackup(parent *os.Root, name string) (Backup, fs.FileI
 		return result, nil, err
 	}
 	allowed := map[string]bool{}
+	optional := map[string]bool{}
 	switch result.Kind {
-	case "acceptance":
+	case "acceptance", "unified":
 		manifestInfo, err := root.Lstat("manifest.json")
 		if err != nil || !manifestInfo.Mode().IsRegular() || manifestInfo.Size() > 64<<10 {
 			return result, nil, errors.New("manifest must be a bounded regular file")
@@ -133,6 +141,20 @@ func (d *Deployer) inspectBackup(parent *os.Root, name string) (Backup, fs.FileI
 			return result, nil, err
 		}
 		targets := d.snapshotTargets()
+		if result.Kind == "unified" {
+			c, err := service.Load(d.layout(service.Config{}).Config, d.unifiedLayout == nil)
+			if err != nil {
+				return result, nil, err
+			}
+			targets = d.unifiedTargets(c, true)
+			if len(records) != len(targets) {
+				targets = d.unifiedTargets(c, false)
+			}
+			for i := range d.managedJobs(c) {
+				optional[fmt.Sprintf("job-%d.plist", i)] = true
+			}
+			optional["parent.plist"], optional["newsyslog.conf"] = true, true
+		}
 		if decoder.Decode(new(any)) != io.EOF || len(records) != len(targets) {
 			return result, nil, errors.New("unexpected backup manifest")
 		}
@@ -164,7 +186,7 @@ func (d *Deployer) inspectBackup(parent *os.Root, name string) (Backup, fs.FileI
 		return result, nil, errors.New("backup contents do not match the manifest")
 	}
 	for _, entry := range entries {
-		if !allowed[entry.Name()] {
+		if !allowed[entry.Name()] && !optional[entry.Name()] {
 			return result, nil, fmt.Errorf("unexpected backup entry %q", entry.Name())
 		}
 		fileInfo, err := root.Lstat(entry.Name())
@@ -185,6 +207,11 @@ func (d *Deployer) inspectBackup(parent *os.Root, name string) (Backup, fs.FileI
 		}
 		result.Files[entry.Name()] = digest
 		result.Bytes += size
+	}
+	for required := range allowed {
+		if _, ok := result.Files[required]; !ok && result.Kind != "installation" {
+			return result, nil, errors.New("backup is missing a required snapshot")
+		}
 	}
 	return result, info, nil
 }
@@ -308,47 +335,5 @@ func (d *Deployer) RemoveBackup(path string) error {
 		return fmt.Errorf("backup removed, but unchanged runtime could not be confirmed: %w", errors.Join(err, errors.New("service or installed-file state changed")))
 	}
 	fmt.Fprintln(d.Out, "Removed backup:", backup.Path, "(service PIDs and installed hashes unchanged)")
-	return nil
-}
-
-// InstallTool updates only the maintenance executable using the existing atomic
-// installer, so adding maintenance commands never requires a proxy restart.
-func (d *Deployer) InstallTool() error {
-	// An older scheduled job can still call commands retired from this tool.
-	health, err := d.Run("/bin/launchctl", "print", healthLabel)
-	if err != nil || launchValues(health)["program"] != d.healthBinary() {
-		return errors.New("migrate the scheduled job with install-health-maintenance before installing this tool")
-	}
-	before, err := d.maintenanceState()
-	if err != nil {
-		return err
-	}
-	backups, err := d.Backups()
-	if err != nil {
-		return fmt.Errorf("backup inventory preflight failed; tool not replaced: %w", err)
-	}
-	source := filepath.Join(d.Root, ToolName)
-	file, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	digest, _, err := hashFile(file)
-	file.Close()
-	if err != nil {
-		return err
-	}
-	if err := d.checkInterrupted(); err != nil {
-		return err
-	}
-	if err := d.InstallFile(source, d.Tool, 0o755); err != nil {
-		return err
-	}
-	before.Files[d.Tool] = digest
-	after, err := d.maintenanceState()
-	if err != nil || !reflect.DeepEqual(before, after) {
-		return errors.New("tool installed, but its hash and unchanged runtime could not be confirmed")
-	}
-	fmt.Fprintln(d.Out, "Maintenance tool installed; service PIDs and other installed hashes unchanged")
-	fmt.Fprintf(d.Out, "Backup inventory verified: %d candidate(s)\n", len(backups))
 	return nil
 }

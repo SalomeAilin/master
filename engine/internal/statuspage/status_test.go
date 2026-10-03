@@ -119,6 +119,21 @@ func fixture(t *testing.T, scenario string) *Collector {
 	return c
 }
 
+func TestUnifiedObserverUsesTheSharedExecutable(t *testing.T) {
+	c := fixture(t, "normal")
+	c.ObserverProgram = "/usr/local/libexec/network-domain-engine"
+	base := c.Run
+	c.Run = func(ctx context.Context, args ...string) (string, error) {
+		if args[0] == "/bin/launchctl" && strings.Contains(args[2], "dns-event-route") {
+			return "state = running\nprogram = " + c.ObserverProgram + "\n", nil
+		}
+		return base(ctx, args...)
+	}
+	if report := c.Collect(context.Background()); report.State != "OK" {
+		t.Fatal(report)
+	}
+}
+
 func TestStatusPolicyAndFallback(t *testing.T) {
 	for _, scenario := range []string{"healthy", "excluded", "drift", "private", "lookup-failure", "broken-policy", "fallback", "unblocked-down", "http-failure"} {
 		t.Run(scenario, func(t *testing.T) {

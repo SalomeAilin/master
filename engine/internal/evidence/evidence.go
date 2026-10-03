@@ -1,12 +1,11 @@
-// Command network-domain-proxy-evidence collects read-only live evidence of
-// the production proxy's egress: for each probe it holds a certificate-verified
-// TLS connection through the proxy while it lists the engine's new kernel
-// sockets. Socket ownership comes from netstat, so no administrator rights are
-// needed; with them, the engine's private log also confirms the decision.
-package main
+// Package evidence correlates proxy decisions with actual kernel connections.
+// macOS may hide the socket table from an unprivileged caller; missing evidence
+// is reported as an error rather than a successful routing check.
+package evidence
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -14,10 +13,12 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
 	"time"
+
+	"network-owned-engine/internal/runtimecheck"
+	"network-owned-engine/internal/service"
 )
 
 const (
@@ -35,41 +36,36 @@ type probeResult struct {
 	Attribution         string           `json:"socket_attribution"`
 }
 
-func main() {
-	output := flag.String("output", "", "also write the report to this new file")
-	flag.Parse()
+func Run(args []string) error {
+	flags := flag.NewFlagSet("evidence", flag.ContinueOnError)
+	output := flags.String("output", "", "also write the report to this new file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("unexpected evidence arguments")
+	}
 	report, err := collect()
 	if err == nil {
 		var data []byte
 		if data, err = json.MarshalIndent(report, "", "  "); err == nil {
 			data = append(data, '\n')
 			if *output != "" {
-				err = writeNew(*output, data)
+				err = service.WriteNew(*output, data)
 			}
 			os.Stdout.Write(data)
 		}
 	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-}
-
-func writeNew(path string, data []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	_, err = file.Write(data)
-	if closeErr := file.Close(); err == nil {
-		err = closeErr
-	}
 	return err
 }
 
+func command(args ...string) (string, error) {
+	return runtimecheck.RunContext(context.Background(), 10*time.Second, args...)
+}
+
 func collect() (map[string]any, error) {
-	pids, err := exec.Command("/usr/bin/pgrep", "-f", "^/usr/local/libexec/network-domain-engine run( |$)").Output()
-	fields := strings.Fields(string(pids))
+	pids, err := command("/usr/bin/pgrep", "-f", "^/usr/local/libexec/network-domain-engine run( |$)")
+	fields := strings.Fields(pids)
 	if err != nil || len(fields) != 1 {
 		return nil, errors.New("expected exactly one production proxy engine")
 	}
@@ -110,7 +106,7 @@ func readable(path string) bool {
 // privileges, but macOS can hide the socket table from processes it has not
 // granted local network access; lsof, as administrator, is the fallback.
 func sockets(pid string) (map[string]bool, error) {
-	out, err := exec.Command("/usr/sbin/netstat", "-anv", "-p", "tcp").Output()
+	out, err := command("/usr/sbin/netstat", "-anv", "-p", "tcp")
 	if err != nil {
 		return nil, err
 	}
@@ -127,14 +123,17 @@ func sockets(pid string) (map[string]bool, error) {
 		}
 		return found, nil
 	}
-	out, _ = exec.Command("/usr/sbin/lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:ESTABLISHED", "-F", "n").Output()
+	out, err = command("/usr/sbin/lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:ESTABLISHED", "-F", "n")
+	if code, known := runtimecheck.ExitCode(err); err != nil && !(known && code == 1 && os.Geteuid() == 0) {
+		return nil, err
+	}
 	found := map[string]bool{}
 	for _, line := range strings.Split(string(out), "\n") {
 		if socket, ok := strings.CutPrefix(line, "n"); ok && strings.Contains(socket, "->") && external(socket) {
 			found[socket] = true
 		}
 	}
-	if len(found) == 0 {
+	if len(found) == 0 && os.Geteuid() != 0 {
 		return nil, errors.New("kernel socket table unavailable: netstat was filtered and lsof needs administrator rights")
 	}
 	return found, nil
@@ -146,6 +145,9 @@ func external(socket string) bool {
 
 func colon(address string) string {
 	index := strings.LastIndexByte(address, '.')
+	if index < 0 {
+		return address
+	}
 	return address[:index] + ":" + address[index+1:]
 }
 
@@ -189,7 +191,7 @@ func probe(pid, host string) (probeResult, error) {
 		}
 	}
 	slices.Sort(candidates)
-	fmt.Fprintf(tlsConnection, "GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: network-split-verification/1\r\n\r\n", host)
+	fmt.Fprintf(tlsConnection, "HEAD / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: network-split-verification/1\r\n\r\n", host)
 	response, err := bufio.NewReader(tlsConnection).ReadString('\n')
 	if err != nil {
 		return probeResult{}, err

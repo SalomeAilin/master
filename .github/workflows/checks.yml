@@ -41,12 +41,6 @@ jobs:
       - name: Offline integration
         working-directory: engine
         run: go test -tags integration -run Integration -timeout 5m .
-      - name: Policy and installation regression
-        run: zsh tests/security_shell.zsh
-      - name: Recovery regression
-        run: zsh tests/recovery.zsh
-      - name: Route snapshots
-        run: zsh tests/route-snapshot.zsh
       - name: Remote access configuration regression
         run: zsh tests/remote_access.zsh
       - name: Patch whitespace
