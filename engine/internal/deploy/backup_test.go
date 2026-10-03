@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -351,5 +352,39 @@ func TestInstallToolFailureKeepsInstalledExecutable(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".") {
 			t.Fatal("temporary installation file retained", entry.Name())
 		}
+	}
+}
+
+func TestBackupInventoryCanListProtectedMacOSParent(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS system-directory compatibility")
+	}
+	parent, err := os.OpenRoot(Production.BackupParent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	// Names only: do not inspect or modify any production backup or database.
+	if _, err := backupDirectoryNames(parent); err != nil {
+		t.Fatal("system directory enumeration requires unrelated metadata access", err)
+	}
+}
+
+func TestInstallToolRefusesInventoryFailureBeforePublication(t *testing.T) {
+	d := maintenanceFixture(t)
+	writeTestFile(t, filepath.Join(d.Root, ToolName), "new maintenance tool")
+	if err := os.Chmod(d.BackupParent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	before, err := d.maintenanceState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.InstallTool(); err == nil || !strings.Contains(err.Error(), "inventory preflight failed") {
+		t.Fatal("inventory failure ignored", err)
+	}
+	after, err := d.maintenanceState()
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("tool replaced before inventory validation", err)
 	}
 }

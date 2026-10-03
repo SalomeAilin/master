@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -220,22 +221,35 @@ func (d *Deployer) Backups() ([]Backup, error) {
 		return nil, err
 	}
 	defer parent.Close()
-	entries, err := fs.ReadDir(parent.FS(), ".")
+	names, err := backupDirectoryNames(parent)
 	if err != nil {
 		return nil, err
 	}
 	result := []Backup{}
-	for _, entry := range entries {
-		if backupKind(entry.Name()) == "" {
+	for _, name := range names {
+		if backupKind(name) == "" {
 			continue
 		}
-		backup, _, err := d.inspectBackup(parent, entry.Name())
+		backup, _, err := d.inspectBackup(parent, name)
 		if err != nil {
 			backup.Error = err.Error()
 		}
 		result = append(result, backup)
 	}
 	return result, nil
+}
+
+func backupDirectoryNames(parent *os.Root) ([]string, error) {
+	directory, err := parent.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer directory.Close()
+	// Root.FS().ReadDir eagerly stats every entry, including protected unrelated
+	// macOS databases. Select our names before inspecting any entry metadata.
+	names, err := directory.Readdirnames(-1)
+	slices.Sort(names)
+	return names, err
 }
 
 func (d *Deployer) InspectBackup(path string) (Backup, error) {
@@ -384,6 +398,10 @@ func (d *Deployer) InstallTool() error {
 	if err != nil {
 		return err
 	}
+	backups, err := d.Backups()
+	if err != nil {
+		return fmt.Errorf("backup inventory preflight failed; tool not replaced: %w", err)
+	}
 	source := filepath.Join(d.Root, ToolName)
 	file, err := os.Open(source)
 	if err != nil {
@@ -406,5 +424,6 @@ func (d *Deployer) InstallTool() error {
 		return errors.New("tool installed, but its hash and unchanged runtime could not be confirmed")
 	}
 	fmt.Fprintln(d.Out, "Maintenance tool installed; service PIDs and other installed hashes unchanged")
+	fmt.Fprintf(d.Out, "Backup inventory verified: %d candidate(s)\n", len(backups))
 	return nil
 }

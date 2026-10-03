@@ -200,7 +200,9 @@ deletion; unexpected new files are left in place rather than recursively removed
 
 To update only this maintenance tool, build `./cmd/network-domain-proxy-deploy`
 using the build flags above, then run the staged executable with `install-tool`
-and administrator authorization. It uses the existing atomic installer and
+and administrator authorization. Backup inventory is checked before publication;
+only matching backup names receive metadata checks, avoiding unrelated protected
+macOS databases. It uses the existing atomic installer and
 checks that only the tool hash changed; engine, DNS and observer PIDs stay the
 same. No rule/configuration staging or proxy upgrade is needed.
 
