@@ -75,6 +75,12 @@ in `engine/cmd/network-split-status` and `engine/internal/statuspage`. It reads
 installed interfaces and DNS configuration; home-directory/output paths are
 runtime arguments, not public source. Switching the existing user LaunchAgent
 requires explicit local activation and verification; no extra schedule is needed.
+The native status collector was activated on 2026-10-03 at 21:53 (+08:00).
+Its first launchd run exited successfully and reported OK for 495 domain/IP
+rows, including 12 policy exclusions and no drift or failed resolutions in
+that sample. The old external source, seven historical copies and the existing
+large log were moved into ignored `local/retired-status-page-20261003/`, not
+published or deleted. This is one acceptance sample, not continuous stability.
 
 ## Browser Domain Routing
 
@@ -245,6 +251,11 @@ packages, not the deployment package, and accepts no installation/deletion
 actions. The old tool's `health-check` action remains a compatibility entry,
 not a second scheduled job. Activation requires the migration below; changing
 this repository alone does not switch the installed job.
+Production completed this migration on 2026-10-03: the real preflight returned
+HTTP 200 in 695 ms with the wired route verified, then the independent job
+produced a new healthy scheduled sample. Installed binary/plist hashes matched
+the staged files; core service PIDs were unchanged and temporary rollback
+directories were removed. The DNS guard-only security update was also accepted.
 Go holds the POSIX `fcntl` writer lock across orphan recovery, probing and state
 publication, including scheduled invocations where no HTTP probe is due. It
 applies a five-minute grace period to abandoned complete or partial health writes.
