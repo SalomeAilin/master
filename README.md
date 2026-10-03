@@ -2,6 +2,8 @@
 
 This repository backs up the active split-routing configuration for this Mac.
 
+[中文概览](docs/overview.zh-CN.md)
+
 ## Repository Layout
 
 | Directory | Contents |
@@ -68,7 +70,11 @@ reads policy from the nearest `config/` directory. System installation still
 requires administrator authorization; see the deployment sections below.
 
 The generated `network-split-status.html` stays at the repository root and is
-ignored by Git so its existing external updater can keep using the same path.
+ignored by Git. The native replacement for the external updater is now versioned
+in `engine/cmd/network-split-status` and `engine/internal/statuspage`. It reads
+installed interfaces and DNS configuration; home-directory/output paths are
+runtime arguments, not public source. Switching the existing user LaunchAgent
+requires explicit local activation and verification; no extra schedule is needed.
 
 ## Browser Domain Routing
 
@@ -104,7 +110,7 @@ Wi-Fi is a metered mobile hotspot. On 2026-10-02 the measured background use of
 it was about 113 MB a day: about 78 MB from status-page probes every five
 minutes, which downloaded the 230 KB Anthropic console page each time; about
 29 MB from a separate one-minute keepalive monitor; and about 5.5 MB from
-hourly rule downloads. The status page outside this repository now probes
+hourly rule downloads. The legacy status page outside this repository was changed to probe
 with header-only requests and no longer fetches the console. The duplicate
 keepalive LaunchAgent is disabled, with its files kept. Together with rule
 revalidation, this brings the expected background use to about 7 MB a day.
@@ -233,7 +239,12 @@ removes eligible files after checking ownership, type, contents, age and open
 file use. The active health state, unrelated files, links, unrecognized data,
 recent writes and nonempty legacy DNS state are preserved.
 
-The existing health job directly runs `network-domain-proxy-deploy health-check`.
+The health job definition directly runs `network-split-health`, a dedicated
+one-shot executable. It imports the shared health and read-only runtime-check
+packages, not the deployment package, and accepts no installation/deletion
+actions. The old tool's `health-check` action remains a compatibility entry,
+not a second scheduled job. Activation requires the migration below; changing
+this repository alone does not switch the installed job.
 Go holds the POSIX `fcntl` writer lock across orphan recovery, probing and state
 publication, including scheduled invocations where no HTTP probe is due. It
 applies a five-minute grace period to abandoned complete or partial health writes.
@@ -241,11 +252,12 @@ Cleanup results use the existing health log. Automatic recovery never removes
 the legacy DNS file or backups. The existing launchd `RunAtLoad` and 30-second
 schedule remain the startup path; there is no health-check shell entry point.
 
-To install this integration, stage the compiled deployment tool together with
+To install this integration, build `./cmd/network-split-health` using the same
+Go version/build flags and stage it beside the compiled deployment tool and
 `config/launchd/com.local.network-split-domestic-health.plist` and run
 `install-health-maintenance` with administrator authorization. It checks a real
 native HTTP request and the wired route before changing files, snapshots the
-prior tool/job/legacy script privately, reloads only the existing health job,
+prior tool/health binary/job/legacy script privately, reloads only the existing health job,
 and removes the legacy script after native activation succeeds. Failure restores
 the prior files and job; incomplete rollback retains and reports its recovery
 directory. Successful activation removes temporary rollback material and verifies
@@ -379,9 +391,9 @@ Offline checks: `zsh tests/remote_access.zsh`.
 - `scripts/china-route.sh` -> `/usr/local/sbin/china-route.sh`
 - `engine/cmd/network-split-dns-event-route-agent` (Go) -> `/usr/local/sbin/network-split-dns-event-route-agent`
 - `engine/cmd/network-split-policy` (Go) -> `/usr/local/sbin/network-split-policy` (address policy the shell guards call)
-- `engine/internal/healthcheck` -> `network-domain-proxy-deploy health-check` (direct launchd entry)
+- `engine/cmd/network-split-health` -> `/usr/local/sbin/network-split-health` (dedicated launchd entry; activation requires migration)
 - Compiled independent `network-domain-engine` -> `/usr/local/libexec/network-domain-engine`
-- `engine/cmd/network-domain-proxy-deploy` (Go) -> `/usr/local/sbin/network-domain-proxy-deploy` (maintenance commands and the scheduled one-shot health check)
+- `engine/cmd/network-domain-proxy-deploy` (Go) -> `/usr/local/sbin/network-domain-proxy-deploy` (manual maintenance; legacy health command retained for compatibility)
 - `config/dnsmasq-network-split.conf` -> `/usr/local/etc/`
 - `config/china_ip_list.txt` -> `/usr/local/etc/`
 - `config/domestic_domains.conf` -> `/usr/local/etc/`
@@ -402,7 +414,7 @@ former engine's license notice is retained in `archive/sing-box-LICENSE`.
 
 | Role | Files | Use on this Mac |
 | --- | --- | --- |
-| Runtime | Native proxy engine, Go DNS event agent, Go `health-check`, `scripts/network-split-guard.sh`, `scripts/china-route.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
+| Runtime | Native proxy engine, Go DNS event agent, Go health check, `scripts/network-split-guard.sh`, `scripts/china-route.sh` | Managed by the existing system jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
 | Shared dependency | `engine/internal/policy` (built into the agent) and the `network-split-policy` program | Address policy for the event agent and both routing scripts; not a daemon |
 | Maintenance | `network-domain-proxy-config`, `network-domain-proxy-deploy`, `network-domain-proxy-evidence` from `engine/cmd/`, `scripts/deploy-security-update.zsh`, `scripts/deploy-remote-access.zsh`, `scripts/install-network-split-dns-event-route-agent.sh` | Manual build, deployment and installation tools, not background jobs; installation can restart services |
 | Verification | Files in `tests/` and Go package tests in `engine/` | Retained tests, not launchd jobs; the evidence tool and the `NETWORK_SPLIT_LIVE` integration test use the live network |

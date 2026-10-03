@@ -2,8 +2,6 @@ package deploy
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,10 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
+
+	"network-owned-engine/internal/runtimecheck"
 )
 
 const acceptancePrefix = "network-domain-independent-backup."
@@ -68,18 +67,7 @@ func backupKind(name string) string {
 	return ""
 }
 
-func (d *Deployer) backupParent() (*os.Root, error) {
-	root, err := os.OpenRoot(d.BackupParent)
-	if err != nil {
-		return nil, err
-	}
-	info, err := root.Stat(".")
-	if err != nil || int(info.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() || info.Mode().Perm()&0o022 != 0 {
-		root.Close()
-		return nil, errors.New("unsafe backup parent directory")
-	}
-	return root, nil
-}
+func (d *Deployer) backupParent() (*os.Root, error) { return runtimecheck.OpenRoot(d.BackupParent) }
 
 func (d *Deployer) backupName(path string) (string, error) {
 	name := filepath.Base(path)
@@ -201,18 +189,7 @@ func (d *Deployer) inspectBackup(parent *os.Root, name string) (Backup, fs.FileI
 	return result, info, nil
 }
 
-func hashFile(file *os.File) (string, int64, error) {
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 64<<20 {
-		return "", 0, errors.New("unsafe or oversized maintenance file")
-	}
-	hash := sha256.New()
-	size, err := io.Copy(hash, io.LimitReader(file, (64<<20)+1))
-	if err != nil || size > 64<<20 {
-		return "", 0, errors.New("could not hash bounded maintenance file")
-	}
-	return hex.EncodeToString(hash.Sum(nil)), size, nil
-}
+func hashFile(file *os.File) (string, int64, error) { return runtimecheck.HashFile(file) }
 
 // Backups lists metadata only. Invalid candidates are reported without deletion.
 func (d *Deployer) Backups() ([]Backup, error) {
@@ -240,16 +217,7 @@ func (d *Deployer) Backups() ([]Backup, error) {
 }
 
 func backupDirectoryNames(parent *os.Root) ([]string, error) {
-	directory, err := parent.Open(".")
-	if err != nil {
-		return nil, err
-	}
-	defer directory.Close()
-	// Root.FS().ReadDir eagerly stats every entry, including protected unrelated
-	// macOS databases. Select our names before inspecting any entry metadata.
-	names, err := directory.Readdirnames(-1)
-	slices.Sort(names)
-	return names, err
+	return runtimecheck.DirectoryNames(parent)
 }
 
 func (d *Deployer) InspectBackup(path string) (Backup, error) {
@@ -266,65 +234,10 @@ func (d *Deployer) InspectBackup(path string) (Backup, error) {
 	return backup, err
 }
 
-type maintenanceState struct {
-	PIDs  map[string]int
-	Files map[string]string
-}
+type maintenanceState = runtimecheck.State
 
 func (d *Deployer) maintenanceState() (maintenanceState, error) {
-	state := maintenanceState{PIDs: map[string]int{}, Files: map[string]string{}}
-	sbin := filepath.Dir(d.Tool)
-	services := map[string]string{
-		Label: d.Binary,
-		"system/com.local.network-split-dns-event-route-agent": filepath.Join(sbin, "network-split-dns-event-route-agent"),
-		"system/homebrew.mxcl.dnsmasq":                         filepath.Join(sbin, "dnsmasq-network-split"),
-	}
-	for label, program := range services {
-		details, err := d.Run("/bin/launchctl", "print", label)
-		if err != nil {
-			return state, err
-		}
-		values := map[string]string{}
-		for _, line := range strings.Split(details, "\n") {
-			if key, value, ok := strings.Cut(strings.TrimSpace(line), " = "); ok {
-				if _, exists := values[key]; !exists {
-					values[key] = value
-				}
-			}
-		}
-		pid, err := strconv.Atoi(values["pid"])
-		if err != nil || pid <= 0 || values["state"] != "running" || values["program"] != program {
-			return state, fmt.Errorf("%s is not running the expected program", label)
-		}
-		state.PIDs[label] = pid
-	}
-	files := []string{d.Binary, d.Config, d.Plist, d.Tool,
-		filepath.Join(filepath.Dir(d.Config), "dnsmasq-network-split.conf"),
-		filepath.Join(filepath.Dir(d.Plist), "com.local.network-split-dns-event-route-agent.plist"),
-		filepath.Join(filepath.Dir(d.Plist), healthPlistName)}
-	for _, name := range []string{"network-split-policy", "network-split-dns-event-route-agent", "dnsmasq-network-split", "china-route.sh", "network-split-guard.sh"} {
-		files = append(files, filepath.Join(sbin, name))
-	}
-	legacy := filepath.Join(sbin, legacyHealthScript)
-	if _, err := os.Lstat(legacy); err == nil {
-		files = append(files, legacy)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return state, err
-	}
-	for _, path := range files {
-		fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-		if err != nil {
-			return state, err
-		}
-		file := os.NewFile(uintptr(fd), path)
-		digest, _, err := hashFile(file)
-		file.Close()
-		if err != nil {
-			return state, err
-		}
-		state.Files[path] = digest
-	}
-	return state, nil
+	return runtimecheck.Inspect(d.Paths, d.Run)
 }
 
 // RemoveBackup is explicit and limited to one validated backup. The CLI holds

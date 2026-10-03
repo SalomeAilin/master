@@ -39,12 +39,14 @@ The module also holds the rest of the system's programs, so no root or
 | `.` (`network-domain-engine`) | Interface-bound HTTP/SOCKS proxy, run by launchd as `nobody` |
 | `cmd/network-split-policy` | Address policy for the zsh route guards: one address sets the exit status; standard input is filtered to authorized addresses |
 | `cmd/network-split-dns-event-route-agent` | Root daemon that tails dnsmasq's query log and binds authorized domestic answers to Ethernet; `-check` verifies its inputs |
+| `cmd/network-split-health` | Dedicated scheduled health executable, with no deployment package dependency |
+| `cmd/network-split-status` | Read-only local HTML status collector; `-check` prints evidence without writing files |
 | `cmd/network-domain-proxy-config` | Writes the engine configuration from `config/` |
 | `cmd/network-domain-proxy-deploy` | Transactional deployment, tool-only installation and explicit backup inspection/removal |
 | `cmd/network-domain-proxy-evidence` | Read-only live egress evidence |
 
 Shared code is in `internal/`: `policy`, `dnsobserver`, `proxyconfig` and
-`deploy`.
+`deploy`, `healthcheck`, `runtimecheck` and `statuspage`.
 
 Generate a configuration into an existing private staging directory with
 `go run ./cmd/network-domain-proxy-config <config-path>`.
@@ -55,13 +57,26 @@ and `remove-backup <exact-path>` for administrator-authorized maintenance.
 path/manifest validation, occupied files, changed state, deployment locking,
 preservation of other backups, and tool-only installation failure.
 `residues` and `cleanup-residues` inspect and retire known orphan state files.
-The existing health job runs the native `health-check` command directly.
+The health job definition runs the dedicated `network-split-health` executable.
+The old deployment-tool `health-check` action is a compatibility entry only.
 `internal/healthcheck` owns HTTP/TLS probing, route assessment, the 30/60/120-second
 scheduler and private atomic state. `install-health-maintenance` migrates the
 existing launchd definition and retires the former shell entry after activation.
 Tests cover native cross-process locking, partial writes, grace-period recovery,
 scheduling replay, route-drift-only recovery and migration rollback. The health
-runtime and its tests do not execute shell scripts or curl.
+runtime and its tests do not execute shell scripts or curl. The migration stages
+both native executables and the existing health plist; deployment still requires
+administrator authorization and scheduled-sample acceptance.
+
+The status collector reads installed configuration instead of embedding local
+addresses or home directories. Foreign HEAD probes bind to the configured
+foreign interface, never use a proxy or download response bodies. The existing
+user LaunchAgent can invoke it with `-output /absolute/path/network-split-status.html`.
+It retains the existing private state/log locations by default; outputs are
+atomic and log history is bounded to one 1 MiB file plus three archives.
+Preexisting oversized logs are refused, not silently discarded. Archive those
+privately before migrating. Status output is IP-route/DNS/connectivity evidence,
+not proof of proxy domain routing, application success or playback stability.
 Private native logs use `--log-file`, `--log-max-size` and
 `--log-max-backups`. The service defaults to one 2 MiB active file and three
 numbered archives. Oversized entries are marked and bounded; an old oversized

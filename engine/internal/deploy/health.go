@@ -1,11 +1,8 @@
 package deploy
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"network-owned-engine/internal/healthcheck"
 )
@@ -18,34 +15,11 @@ func (d *Deployer) healthRunner() *healthcheck.Runner {
 		LogPath: d.HealthLog, ConfigPath: d.Config, Now: d.Now, Run: d.Run}
 }
 
-// HealthCheck owns the existing state lock for cleanup, probing and publication.
-// It does not acquire the proxy deployment lock or start another process of itself.
-func (d *Deployer) HealthCheck() error {
-	release, err := d.lockHealthState()
-	if errors.Is(err, errHealthBusy) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer release()
-	runner := d.healthRunner()
-	var output bytes.Buffer
-	previous := d.Out
-	d.Out = &output
-	err = d.cleanupResiduesLocked(true)
-	d.Out = previous
-	if err != nil {
-		if err := runner.Logf("state cleanup deferred: %v", err); err != nil {
-			return err
-		}
-	} else if message := strings.TrimSpace(output.String()); message != "" {
-		if err := runner.Logf("%s", message); err != nil {
-			return err
-		}
-	}
-	return runner.RunOnce(d.Context)
+func (d *Deployer) healthJob() *healthcheck.Job {
+	return &healthcheck.Job{Paths: d.Paths, Context: d.Context, Out: d.Out, Run: d.Run, Now: d.Now, Interrupted: d.checkInterrupted}
 }
+
+func (d *Deployer) HealthCheck() error { return d.healthJob().HealthCheck() }
 
 func (d *Deployer) preflightHealth() error {
 	if d.PreflightHealth != nil {

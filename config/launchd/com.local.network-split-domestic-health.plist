@@ -6,8 +6,7 @@
   <string>com.local.network-split-domestic-health</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/sbin/network-domain-proxy-deploy</string>
-    <string>health-check</string>
+    <string>/usr/local/sbin/network-split-health</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

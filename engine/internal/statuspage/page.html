@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>网络分流状态</title>
+  <style>
+    :root{color-scheme:light;--bg:#f6f8fb;--text:#17202a;--muted:#5c6875;--line:#d9e0e8}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:0}
+    header,main{max-width:1040px;margin:0 auto;padding:24px}header{padding-top:32px}h1{margin:0 0 8px;font-size:30px}h2{margin:28px 0 12px;font-size:18px}p{color:var(--muted)}
+    table{width:100%;border-collapse:collapse;background:white;border:1px solid var(--line);table-layout:fixed}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;overflow-wrap:anywhere}th{color:var(--muted);font-size:13px}.ok,.wired,.OK{color:#16834a}.bad,.drift,.BAD,.unknown{color:#b3261e}.blocked,.FALLBACK,.policy-excluded{color:#9a6200}.status{font-weight:700;font-size:20px}
+    @media(max-width:560px){header,main{padding:16px}th,td{padding:8px 6px;font-size:13px}h1{font-size:26px}}
+  </style>
+</head>
+<body>
+  <header><h1>网络分流状态</h1><p>更新时间：{{.Updated.Format "2006-01-02 15:04:05 MST"}}</p><div class="status {{.State}}">{{.State}}</div></header>
+  <main>
+    <h2>检查结果</h2>
+    <table><thead><tr><th>项目</th><th>状态</th><th>证据</th></tr></thead><tbody>{{range .Checks}}<tr><td>{{.Name}}</td><td class="{{.State}}">{{.State}}</td><td>{{.Detail}}</td></tr>{{end}}</tbody></table>
+    <h2>国内域名 IP 路由</h2>
+    <table><thead><tr><th>域名</th><th>IP</th><th>状态</th><th>线路</th></tr></thead><tbody>{{range .Domains}}<tr><td>{{.Name}}</td><td>{{.Address}}</td><td class="{{.State}}">{{.State}}</td><td>{{.Detail}}</td></tr>{{end}}</tbody></table>
+    <h2>验收边界</h2><table><tbody><tr><th>代理域名出口</th><td>本页未取证</td></tr><tr><th>视频播放及长期稳定性</th><td>本页未验证</td></tr><tr><th>DNS 安全结论</th><td>配置与样本检查，不代表不存在劫持</td></tr></tbody></table>
+  </main>
+</body>
+</html>

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"network-owned-engine/internal/healthcheck"
+	"network-owned-engine/internal/runtimecheck"
 )
 
 func launchValues(details string) map[string]string {
@@ -29,6 +30,10 @@ func (d *Deployer) healthDefinition() string {
 	return filepath.Join(filepath.Dir(d.Plist), healthPlistName)
 }
 
+func (d *Deployer) healthBinary() string {
+	return filepath.Join(filepath.Dir(d.Tool), runtimecheck.HealthBinaryName)
+}
+
 func (d *Deployer) validateHealthDefinition(source string) error {
 	candidate, err := d.readPlist(source)
 	if err != nil {
@@ -39,7 +44,7 @@ func (d *Deployer) validateHealthDefinition(source string) error {
 		return err
 	}
 	if candidate["Label"] != strings.TrimPrefix(healthLabel, "system/") || candidate["RunAtLoad"] != true ||
-		candidate["StartInterval"] != float64(30) || !reflect.DeepEqual(candidate["ProgramArguments"], []any{d.Tool, "health-check"}) {
+		candidate["StartInterval"] != float64(30) || !reflect.DeepEqual(candidate["ProgramArguments"], []any{d.healthBinary()}) {
 		return errors.New("unexpected native health service definition")
 	}
 	a, b := maps.Clone(previous), maps.Clone(candidate)
@@ -102,7 +107,7 @@ func (d *Deployer) waitNativeHealth() error {
 		details, err := d.Run("/bin/launchctl", "print", healthLabel)
 		if err == nil {
 			values := launchValues(details)
-			if values["program"] != d.Tool {
+			if values["program"] != d.healthBinary() {
 				return errors.New("health job is not using the Go tool")
 			}
 			runs, _ := strconv.Atoi(values["runs"])
@@ -190,6 +195,10 @@ func (d *Deployer) InstallHealthMaintenance() (resultErr error) {
 	if err != nil {
 		return err
 	}
+	healthHash, err := fileDigest(filepath.Join(d.Root, runtimecheck.HealthBinaryName))
+	if err != nil {
+		return err
+	}
 	var release func()
 	for attempt := 0; attempt < 100; attempt++ {
 		release, err = d.lockHealthState()
@@ -227,7 +236,7 @@ func (d *Deployer) InstallHealthMaintenance() (resultErr error) {
 			}
 		}
 	}()
-	records, err := d.snapshot(backup, []string{d.Tool, definition, legacy})
+	records, err := d.snapshot(backup, []string{d.Tool, d.healthBinary(), definition, legacy})
 	if err != nil {
 		return err
 	}
@@ -243,6 +252,9 @@ func (d *Deployer) InstallHealthMaintenance() (resultErr error) {
 		}
 		previousProbe := d.previousHealthProbe()
 		changed = true
+		if err := d.InstallFile(filepath.Join(d.Root, runtimecheck.HealthBinaryName), d.healthBinary(), 0o755); err != nil {
+			return err
+		}
 		if err := d.InstallFile(filepath.Join(d.Root, ToolName), d.Tool, 0o755); err != nil {
 			return err
 		}
@@ -271,6 +283,7 @@ func (d *Deployer) InstallHealthMaintenance() (resultErr error) {
 			}
 		}
 		before.Files[d.Tool], before.Files[definition] = toolHash, plistHash
+		before.Files[d.healthBinary()] = healthHash
 		delete(before.Files, legacy)
 		after, err := d.maintenanceState()
 		if err != nil || !reflect.DeepEqual(before, after) {

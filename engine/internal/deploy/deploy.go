@@ -21,6 +21,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"network-owned-engine/internal/runtimecheck"
 )
 
 const (
@@ -37,46 +39,13 @@ var (
 	RuleNames = []string{"domestic", "foreign", "china"}
 )
 
-// Paths are the installed locations the deployment manages.
-type Paths struct {
-	HealthLog                                                                    string
-	State, Plist, Config, Binary, Tool, Rules, Cache, LogDir, Lock, BackupParent string
-	HealthLock                                                                   string
-}
+type Paths = runtimecheck.Paths
 
-var Production = Paths{
-	State:        "/var/db/network-domain-proxy.previous.json",
-	Plist:        "/Library/LaunchDaemons/com.local.network-domain-proxy.plist",
-	Config:       "/usr/local/etc/network-domain-proxy.json",
-	Binary:       "/usr/local/libexec/network-domain-engine",
-	Tool:         "/usr/local/sbin/network-domain-proxy-deploy",
-	Rules:        "/usr/local/etc/network-domain-rules-independent",
-	Cache:        "/var/db/network-domain-proxy/independent-cache",
-	LogDir:       "/var/log/network-domain-proxy",
-	Lock:         "/var/db/network-domain-proxy.deploy.lock",
-	BackupParent: "/var/db",
-	HealthLock:   "/var/run/network-split-domestic-health.flock",
-	HealthLog:    "/var/log/network-split-domestic-health.log",
-}
+var Production = runtimecheck.Production
 
-// CommandError reports a command that exited with a non-zero status.
-type CommandError struct {
-	Args   []string
-	Code   int
-	Output string
-}
+type CommandError = runtimecheck.CommandError
 
-func (e *CommandError) Error() string {
-	return fmt.Sprintf("%s exited with status %d: %s", strings.Join(e.Args, " "), e.Code, strings.TrimSpace(e.Output))
-}
-
-func exitCode(err error) (int, bool) {
-	var command *CommandError
-	if errors.As(err, &command) {
-		return command.Code, true
-	}
-	return 0, false
-}
+func exitCode(err error) (int, bool) { return runtimecheck.ExitCode(err) }
 
 // Record describes one snapshotted target.
 type Record struct {
@@ -126,19 +95,7 @@ func New(paths Paths, root string, out io.Writer) *Deployer {
 		Rename: os.Rename}
 }
 
-func runCommand(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
-	if ctx.Err() != nil {
-		return string(output), fmt.Errorf("%s timed out", strings.Join(args, " "))
-	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		return string(output), &CommandError{Args: args, Code: exit.ExitCode(), Output: string(output)}
-	}
-	return string(output), err
-}
+func runCommand(args ...string) (string, error) { return runtimecheck.Run(args...) }
 
 func processAlive(pid int) (bool, error) {
 	switch err := syscall.Kill(pid, 0); {

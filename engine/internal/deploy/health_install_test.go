@@ -39,12 +39,13 @@ func healthMigrationFixture(t *testing.T) (*Deployer, *healthMigration) {
 		return nil
 	}
 	writeTestFile(t, filepath.Join(d.Root, ToolName), "native maintenance tool")
+	writeTestFile(t, filepath.Join(d.Root, filepath.Base(d.healthBinary())), "independent native health runtime")
 	for _, item := range []struct {
 		path string
 		args []any
 	}{
 		{d.healthDefinition(), []any{filepath.Join(filepath.Dir(d.Tool), legacyHealthScript)}},
-		{filepath.Join(d.Root, healthPlistName), []any{d.Tool, "health-check"}},
+		{filepath.Join(d.Root, healthPlistName), []any{d.healthBinary()}},
 	} {
 		data, _ := json.Marshal(map[string]any{"Label": strings.TrimPrefix(healthLabel, "system/"), "ProgramArguments": item.args, "RunAtLoad": true, "StartInterval": 30})
 		writeTestFile(t, item.path, string(data))
@@ -66,7 +67,7 @@ func healthMigrationFixture(t *testing.T) (*Deployer, *healthMigration) {
 			if err := json.Unmarshal(data, &config); err != nil {
 				return "", err
 			}
-			native := config.Arguments[0] == d.Tool
+			native := config.Arguments[0] == d.healthBinary()
 			switch args[1] {
 			case "print":
 				if !f.loaded {
@@ -74,7 +75,7 @@ func healthMigrationFixture(t *testing.T) (*Deployer, *healthMigration) {
 				}
 				if native && f.fault == "running-first" && !f.sawRunning {
 					f.sawRunning = true
-					return fmt.Sprintf("program = %s\nstate = running\nruns = 1\nlast exit code = (never exited)\n", d.Tool), nil
+					return fmt.Sprintf("program = %s\nstate = running\nruns = 1\nlast exit code = (never exited)\n", d.healthBinary()), nil
 				}
 				code := "0"
 				if native && f.fault == "activation" {
@@ -128,6 +129,7 @@ func TestNativeHealthMigrationPreservesCoreAndRetiresShell(t *testing.T) {
 	}
 	before.Files[d.Tool] = after.Files[d.Tool]
 	before.Files[d.healthDefinition()] = after.Files[d.healthDefinition()]
+	before.Files[d.healthBinary()] = after.Files[d.healthBinary()]
 	delete(before.Files, filepath.Join(filepath.Dir(d.Tool), legacyHealthScript))
 	if !reflect.DeepEqual(before, after) || !f.loaded || !f.sawRunning {
 		t.Fatal("runtime or activation mismatch")
