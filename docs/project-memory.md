@@ -2,6 +2,8 @@
 
 项目规则见 [AGENTS.md](../AGENTS.md)。以下保留各次记录的日期和原文；历史观察、版本及验收结果只说明当时状态，复用时核对现有源码和实际运行情况。
 
+- 2026-10-03（目录整理）：根目录 README 作为中文入口，[操作与维护](operations.md)保存现行命令和完整组件清单，[历史验收](history.md)保存从旧 README 移出的测量及限制。私有退役状态页材料现统一放在 `local/archive/retired-status-page-20261003/`，原记录中的 `local/retired-status-page-20261003/` 是整理前位置；内容经哈希核对未变。公开旧验收页和路由快照移入 `archive/`，许可证原文保留。目录整理不改变系统安装文件、分流配置或启动任务。
+
 - 2026-09-25：在这台 Mac 的 zsh 里，`log` 是 shell 内置命令。查系统日志必须写 `/usr/bin/log show ...`。直接写 `log show` 会报 "too many arguments"，加了 `2>/dev/null` 就会静默返回空结果，曾因此误判为"没有日志记录"。
 - 2026-09-25：用户说的"复刻"指 GitHub Fork。sing-box 的 fork 在 `SalomeAilin/sing-box`。
 - 2026-10-02：独立代理 `0.1.0-independent` 已经管理员验证并接管线上，源码在 `engine/`，只依赖 Go 标准库，不导入或执行 sing-box。验收通过后，已移除停用旧二进制、旧规则与缓存、当前 `sing-box/` 源码及其可选客户端配置；历史提交保留，原许可证移至 `archive/sing-box-LICENSE`。DNS 观察、IP 路由守护与 dnsmasq 仍是独立组件，不能把代理接管称为整套业务迁移完成。外部数据及 Go、macOS 的作者权利不因自研迁移而转移。同日 12:50 起，线上换成 `0.1.1-independent`，只换了二进制：DNS 结果按 TTL 缓存，最长 5 分钟；隧道只在两个方向都 5 分钟没有数据时才关闭。旧版在单方向安静满 5 分钟时会误发 FIN；实测有一次超过 5 分钟的 HTTP/1.1 下载随后被服务器断开。

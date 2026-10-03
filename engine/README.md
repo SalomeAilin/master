@@ -31,58 +31,32 @@ build and run the engine binary use the `integration` tag:
 `go test -tags integration -run Integration .`; add `NETWORK_SPLIT_LIVE=1` for
 the real-network fail-closed check.
 
-The module also holds the system's native programs, removing the runtime
-dependency on a user-writable Python interpreter. The two IP guards still use
-the system zsh:
+## Programs and Shared Code
 
-| Program | Role |
+The root package builds `network-domain-engine`; `cmd/` contains the native
+policy, observer, health, status, configuration, deployment and evidence
+commands. Their roles, installation paths and invocation rules are listed once
+in the [operations guide](../docs/operations.md#组件清单).
+
+| Package | Responsibility |
 | --- | --- |
-| `.` (`network-domain-engine`) | Interface-bound HTTP/SOCKS proxy, run by launchd as `nobody` |
-| `cmd/network-split-policy` | Address policy for the zsh route guards: one address sets the exit status; standard input is filtered to authorized addresses |
-| `cmd/network-split-dns-event-route-agent` | Root daemon that tails dnsmasq's query log and binds authorized domestic answers to Ethernet; `-check` verifies its inputs |
-| `cmd/network-split-health` | Dedicated scheduled health executable, with no deployment package dependency |
-| `cmd/network-split-status` | Read-only local HTML status collector; `-check` prints evidence without writing files |
-| `cmd/network-domain-proxy-config` | Writes the engine configuration from `config/` |
-| `cmd/network-domain-proxy-deploy` | Transactional deployment, tool-only installation and explicit backup inspection/removal |
-| `cmd/network-domain-proxy-evidence` | Read-only live egress evidence |
+| `internal/policy` | Authorize public IPv4 addresses against the configured intervals |
+| `internal/dnsobserver` | Follow DNS query logs, correlate answers and request authorized routes |
+| `internal/healthcheck` | Probe, schedule, lock and publish bounded private health state |
+| `internal/statuspage` | Collect read-only evidence and render the local status page |
+| `internal/proxyconfig` | Generate proxy configuration from repository policy |
+| `internal/runtimecheck` | Shared paths, command results and runtime-file/PID checks |
+| `internal/deploy` | Administrator-authorized installation, rollback and explicit maintenance |
 
-Shared code is in `internal/`: `policy`, `dnsobserver`, `proxyconfig` and
-`deploy`, `healthcheck`, `runtimecheck` and `statuspage`.
+The dedicated health command does not import `internal/deploy`. Its scheduled
+entry is separate from the maintenance CLI; the latter retains a legacy
+`health-check` action only for compatibility. Two IP guards still use system
+zsh, and dnsmasq is installed separately.
 
-Generate a configuration into an existing private staging directory with
-`go run ./cmd/network-domain-proxy-config <config-path>`.
-The engine accepts `check -c <path>`, `run -c <path>` and `version`.
-The installed deployment tool accepts `backups`, `inspect-backup <exact-path>`
-and `remove-backup <exact-path>` for administrator-authorized maintenance.
-`install-tool` updates only that executable. The backup and CLI tests cover
-path/manifest validation, occupied files, changed state, deployment locking,
-preservation of other backups, and tool-only installation failure.
-`residues` and `cleanup-residues` inspect and retire known orphan state files.
-The health job definition runs the dedicated `network-split-health` executable.
-The old deployment-tool `health-check` action is a compatibility entry only.
-`internal/healthcheck` owns HTTP/TLS probing, route assessment, the 30/60/120-second
-scheduler and private atomic state. `install-health-maintenance` migrates the
-existing launchd definition and retires the former shell entry after activation.
-Tests cover native cross-process locking, partial writes, grace-period recovery,
-scheduling replay, route-drift-only recovery and migration rollback. The health
-runtime and its tests do not execute shell scripts or curl. The migration stages
-both native executables and the existing health plist; deployment still requires
-administrator authorization and scheduled-sample acceptance.
-
-The status collector reads installed configuration instead of embedding local
-addresses or home directories. Foreign HEAD probes bind to the configured
-foreign interface, never use a proxy or download response bodies. The existing
-user LaunchAgent can invoke it with `-output /absolute/path/network-split-status.html`.
-It retains the existing private state/log locations by default; outputs are
-atomic and log history is bounded to one 1 MiB file plus three archives.
-Preexisting oversized logs are refused, not silently discarded. Archive those
-privately before migrating. Status output is IP-route/DNS/connectivity evidence,
-not proof of proxy domain routing, application success or playback stability.
-Private native logs use `--log-file`, `--log-max-size` and
-`--log-max-backups`. The service defaults to one 2 MiB active file and three
-numbered archives. Oversized entries are marked and bounded; an old oversized
-file is archived at startup rather than silently truncated. Only one process
-may write a log path.
+Builds do not activate services. See [deployment](../docs/operations.md#构建与部署),
+[maintenance](../docs/operations.md#备份与残留) and
+[log limits](../docs/operations.md#日志与状态) before changing an installed copy.
+Historical measurements are in the [acceptance record](../docs/history.md).
 
 ## Routing Contract
 
@@ -131,6 +105,42 @@ Each payload is limited to 16 MiB, parsed strictly and compiled before atomic
 cache replacement and in-memory activation. Failed, empty, oversized,
 unsupported or corrupt updates keep the last working rules. Runtime caches are private, with only
 three fixed dataset names. No additional updater daemon is installed.
+
+## IP Routing and Health Checks
+
+The DNS observer correlates CNAME answers within one dnsmasq process, query ID
+and client. Pending domestic queries expire after 30 seconds and are capped at
+4096; reused IDs, configuration reloads and log changes discard stale context.
+A shared CDN alias is not retained as a global domestic classification.
+
+Address policy uses sorted, merged IPv4 intervals. It preserves gaps, rejects
+special addresses, checks file identity and modification metadata, and
+authorizes nothing when an input is missing or malformed. Guards filter each
+domain's answer batch in one helper invocation; route mutations check policy
+again. Domain ownership alone does not authorize a global IP route.
+
+The default-route guard holds its existing kernel lock to prevent overlapping
+instances. It reconciles reject routes even if the Wi-Fi default has already
+returned. This is scheduled recovery, not an event-driven guarantee; the lock
+does not serialize every component that can manage routes.
+
+The domestic health job wakes every 30 seconds. Six healthy 2xx/3xx samples
+establish a latency baseline and permit a 60-second probe interval; six
+acceptable trial samples permit 120 seconds. A 401/403 response can establish
+connectivity but is not a performance-baseline sample.
+
+A latency regression must exceed both 50% and 250 ms. Three consecutive
+regressions, or a six-sample median above that threshold, restore 30 seconds.
+Probe failures, confirmed drift and unacceptable/slow responses also restore
+the baseline cadence, with a ten-minute cooldown before another trial.
+Malformed, stale or backward-clock state resets the schedule.
+
+The probe uses direct IPv4, certificate-verified TLS and a 4 MiB response cap.
+The expected interface comes from the installed configuration and its gateway
+from the scoped route. Only confirmed route drift requests the existing guard,
+using `kickstart` without `-k`; DNS/HTTP errors or timing changes do not restart
+services. At a 120-second interval, detecting a failure can take about two
+minutes plus probe time. One endpoint is not a monitor for every application.
 
 ## Verification Limits
 
