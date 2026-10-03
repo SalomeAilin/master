@@ -31,8 +31,9 @@ build and run the engine binary use the `integration` tag:
 `go test -tags integration -run Integration .`; add `NETWORK_SPLIT_LIVE=1` for
 the real-network fail-closed check.
 
-The module also holds the rest of the system's programs, so no root or
-`nobody` service depends on an interpreter:
+The module also holds the system's native programs, removing the runtime
+dependency on a user-writable Python interpreter. The two IP guards still use
+the system zsh:
 
 | Program | Role |
 | --- | --- |

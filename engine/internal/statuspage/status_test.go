@@ -152,6 +152,9 @@ func TestStatusPublicationEscapesAndBoundsHistory(t *testing.T) {
 		t.Fatal("unsafe HTML")
 	}
 	before, _ := os.ReadFile(log)
+	if !strings.Contains(string(before), "issues=1") || !strings.Contains(string(before), "alert(1)") {
+		t.Fatal("failure cause missing from bounded history")
+	}
 	if err := r.Publish(html, state, log); err != nil {
 		t.Fatal(err)
 	}
@@ -200,6 +203,22 @@ func TestStatusPublicationPreservesSymlinkTargets(t *testing.T) {
 	data, _ := os.ReadFile(target)
 	if string(data) != "keep" {
 		t.Fatal("user content overwritten")
+	}
+}
+
+func TestFailureDetailsRemainBoundedAfterJSONEscaping(t *testing.T) {
+	dir := t.TempDir()
+	r := Report{Updated: time.Now(), State: "BAD"}
+	for i := 0; i < 10; i++ {
+		r.Checks = append(r.Checks, Row{Name: strings.Repeat("\x00", 1000), State: "bad", Detail: strings.Repeat("\x01", 1000)})
+	}
+	log := filepath.Join(dir, "log")
+	if err := r.Publish(filepath.Join(dir, "page"), filepath.Join(dir, "state"), log); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil || len(data) > 8192 || !strings.Contains(string(data), "issues=10") {
+		t.Fatal("unbounded or missing failure history", err)
 	}
 }
 

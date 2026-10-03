@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -153,7 +154,29 @@ func (r Report) Publish(htmlPath, statePath, logPath string) error {
 	if bytes.Equal(previous, data) {
 		return nil
 	}
-	line := fmt.Sprintf("%s state=%s checks=%d domains=%d\n", r.Updated.Format("2006-01-02 15:04:05"), r.State, len(r.Checks), len(r.Domains))
+	var issues []Row
+	count := 0
+	for _, row := range slices.Concat(r.Checks, r.Domains) {
+		if row.State != "bad" && row.State != "drift" && row.State != "unknown" {
+			continue
+		}
+		count++
+		if len(issues) < 6 {
+			row.Name = row.Name[:min(len(row.Name), 128)]
+			row.Detail = row.Detail[:min(len(row.Detail), 256)]
+			row.Address = row.Address[:min(len(row.Address), 45)]
+			issues = append(issues, row)
+		}
+	}
+	issueData, err := json.Marshal(issues)
+	if err != nil {
+		return err
+	}
+	for len(issueData) > 6000 {
+		issues = issues[:len(issues)-1]
+		issueData, _ = json.Marshal(issues)
+	}
+	line := fmt.Sprintf("%s state=%s checks=%d domains=%d issues=%d details=%s\n", r.Updated.Format("2006-01-02 15:04:05"), r.State, len(r.Checks), len(r.Domains), count, issueData)
 	if err := appendLog(logPath, line); err != nil {
 		return err
 	}
