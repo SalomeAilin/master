@@ -54,6 +54,11 @@ and `remove-backup <exact-path>` for administrator-authorized maintenance.
 `install-tool` updates only that executable. The backup and CLI tests cover
 path/manifest validation, occupied files, changed state, deployment locking,
 preservation of other backups, and tool-only installation failure.
+`residues` and `cleanup-residues` inspect and retire known orphan state files.
+The existing health job uses `cleanup-health-state`; `install-health-maintenance`
+installs the tool and that existing entry point together. Tests cover the real
+zsh/Go writer-lock interaction, partial writes, the grace period and recovery by
+a newly initialized process without removing active state.
 Private native logs use `--log-file`, `--log-max-size` and
 `--log-max-backups`. The service defaults to one 2 MiB active file and three
 numbered archives. Oversized entries are marked and bounded; an old oversized

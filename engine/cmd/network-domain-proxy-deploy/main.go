@@ -15,14 +15,14 @@ import (
 	"network-owned-engine/internal/deploy"
 )
 
-const usage = "usage: network-domain-proxy-deploy install|upgrade|enable|rollback|install-tool|backups|inspect-backup <path>|remove-backup <path>"
+const usage = "usage: network-domain-proxy-deploy install|upgrade|enable|rollback|install-tool|install-health-maintenance|backups|inspect-backup <path>|remove-backup <path>|residues|cleanup-residues|cleanup-health-state"
 
 func validArguments(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	switch args[0] {
-	case "install", "upgrade", "enable", "rollback", "install-tool", "backups":
+	case "install", "upgrade", "enable", "rollback", "install-tool", "install-health-maintenance", "backups", "residues", "cleanup-residues", "cleanup-health-state":
 		return len(args) == 1
 	case "inspect-backup", "remove-backup":
 		return len(args) == 2
@@ -102,6 +102,16 @@ func run(d *deploy.Deployer, args ...string) error {
 		err = d.RemoveBackup(args[1])
 	case "install-tool":
 		err = d.InstallTool()
+	case "install-health-maintenance":
+		err = d.InstallHealthMaintenance()
+	case "residues":
+		var residues []deploy.Residue
+		residues, err = d.Residues()
+		if err == nil {
+			err = json.NewEncoder(d.Out).Encode(residues)
+		}
+	case "cleanup-residues", "cleanup-health-state":
+		err = d.CleanupResidues(args[0] == "cleanup-health-state")
 	}
 	return err
 }

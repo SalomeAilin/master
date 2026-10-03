@@ -151,6 +151,14 @@ record_probe_sample() {
 
 # Kernel lock is released even if this process is killed without cleanup.
 umask 077
+# Recover abandoned temporary states through the Go maintenance tool before
+# acquiring the same writer lock. The active state file is never a candidate.
+if maintenance_result="$(/usr/local/sbin/network-domain-proxy-deploy cleanup-health-state 2>&1)"; then
+  [[ -z "$maintenance_result" ]] || log "$maintenance_result"
+else
+  log "state cleanup deferred: $maintenance_result"
+fi
+unset maintenance_result
 zmodload zsh/system || exit 1
 : >> "$LOCK_FILE" || exit 1
 if ! zsystem flock -t 0 -f lock_fd "$LOCK_FILE"; then

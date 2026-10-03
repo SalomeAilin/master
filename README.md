@@ -206,6 +206,26 @@ macOS databases. It uses the existing atomic installer and
 checks that only the tool hash changed; engine, DNS and observer PIDs stay the
 same. No rule/configuration staging or proxy upgrade is needed.
 
+State residue is separate from backups. `residues` lists only the known health
+temporary-state names and the retired DNS route-state file; `cleanup-residues`
+removes eligible files after checking ownership, type, contents, age and open
+file use. The active health state, unrelated files, links, unrecognized data,
+recent writes and nonempty legacy DNS state are preserved.
+
+The existing health job invokes `cleanup-health-state` before taking its writer
+lock, including scheduled runs where no HTTP probe is due. The Go helper shares
+the same POSIX `fcntl` lock as `zsystem flock`, applies a five-minute grace period
+and recovers abandoned complete or partial health writes. When there are no
+eligible files it performs no external probes. Cleanup results go to the existing
+health log. Automatic recovery never removes the legacy DNS file or backups.
+The existing launchd `RunAtLoad` and 30-second schedule remain the startup path.
+
+To install this integration, stage the compiled deployment tool together with
+`scripts/network-split-domestic-health.sh` and run `install-health-maintenance`
+with administrator authorization. It publishes the tool before the existing
+health entry point, verifies service PIDs and installed hashes, and performs the
+initial state cleanup under the writer lock. No additional job is installed.
+
 ### Verification
 
 `go test -race ./...` from `engine/` covers protocol forwarding, rule

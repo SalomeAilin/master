@@ -301,7 +301,7 @@ func (d *Deployer) maintenanceState() (maintenanceState, error) {
 	files := []string{d.Binary, d.Config, d.Plist, d.Tool,
 		filepath.Join(filepath.Dir(d.Config), "dnsmasq-network-split.conf"),
 		filepath.Join(filepath.Dir(d.Plist), "com.local.network-split-dns-event-route-agent.plist")}
-	for _, name := range []string{"network-split-policy", "network-split-dns-event-route-agent", "dnsmasq-network-split", "china-route.sh", "network-split-guard.sh"} {
+	for _, name := range []string{"network-split-policy", "network-split-dns-event-route-agent", "dnsmasq-network-split", "china-route.sh", "network-split-guard.sh", healthScript} {
 		files = append(files, filepath.Join(sbin, name))
 	}
 	for _, path := range files {

@@ -276,6 +276,7 @@ print 'PASS health recovery uses one non-restarting launchd request, only for dr
   health_lock="$test_dir/integration.lock"
   health_log="$test_dir/integration.log"
   requests="$test_dir/requests"
+  maintenance_requests="$test_dir/maintenance-requests"
   recovery_requests="$test_dir/recovery-requests"
   body="$(sed -e 's|^STATE_FILE=.*|STATE_FILE="$health_state"|' \
     -e 's|^LOCK_FILE=.*|LOCK_FILE="$health_lock"|' \
@@ -283,6 +284,7 @@ print 'PASS health recovery uses one non-restarting launchd request, only for dr
     -e 's|^now=\$EPOCHSECONDS$|now=$fake_now|' \
     -e 's|/usr/bin/curl|mock_curl|g' \
     -e 's|/sbin/route|mock_route|g' \
+    -e 's|/usr/local/sbin/network-domain-proxy-deploy|mock_maintenance|g' \
     -e 's|/bin/launchctl|mock_launchctl|g' scripts/network-split-domestic-health.sh)"
   mock_curl() {
     print called >> "$requests"
@@ -291,6 +293,10 @@ print 'PASS health recovery uses one non-restarting launchd request, only for dr
   }
   mock_route() { print "gateway: $route_gateway\ninterface: en0"; }
   mock_launchctl() { print "$*" >> "$recovery_requests"; }
+  mock_maintenance() {
+    [[ "$1" = cleanup-health-state ]] || return 1
+    print called >> "$maintenance_requests"
+  }
   run_health() ( set +e; eval "$body" )
   response='200|0.100000'
   route_gateway=192.168.1.1
@@ -298,9 +304,10 @@ print 'PASS health recovery uses one non-restarting launchd request, only for dr
   for fake_now in {1000..4600..30}; do run_health; done
   # 121 scheduled invocations: six at 30s, six at 60s, then 25 at 120s.
   [[ $(wc -l < "$requests") -eq 37 ]]
+  [[ $(wc -l < "$maintenance_requests") -eq 121 ]]
   [[ ! -e "$recovery_requests" ]]
   [[ "$(<"$health_state")" = *'probe_interval=120'* ]]
-  print 'PASS replay: 37 HTTP probes versus 121 fixed-cadence probes, no route repair'
+  print 'PASS replay: state recovery on all 121 runs, 37 HTTP probes, no route repair'
 
   # A failed trial immediately restores the original cadence, without repair.
   fake_now=4720

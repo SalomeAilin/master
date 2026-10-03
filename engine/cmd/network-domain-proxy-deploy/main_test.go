@@ -10,12 +10,12 @@ import (
 )
 
 func TestCommandArgumentsRejectImplicitOrBatchDeletion(t *testing.T) {
-	for _, args := range [][]string{nil, {"remove-backup"}, {"remove-backup", "one", "two"}, {"remove-backup", "--all", "one"}, {"backups", "one"}, {"unknown"}, {"rollback", "one"}} {
+	for _, args := range [][]string{nil, {"remove-backup"}, {"remove-backup", "one", "two"}, {"remove-backup", "--all", "one"}, {"backups", "one"}, {"cleanup-residues", "arbitrary-path"}, {"unknown"}, {"rollback", "one"}} {
 		if validArguments(args) {
 			t.Fatal("accepted", args)
 		}
 	}
-	for _, args := range [][]string{{"upgrade"}, {"install-tool"}, {"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}} {
+	for _, args := range [][]string{{"upgrade"}, {"install-tool"}, {"install-health-maintenance"}, {"residues"}, {"cleanup-residues"}, {"cleanup-health-state"}, {"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}} {
 		if !validArguments(args) {
 			t.Fatal("rejected", args)
 		}
@@ -30,7 +30,7 @@ func TestBackupCommandsRespectDeploymentLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}, {"install-tool"}} {
+	for _, args := range [][]string{{"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}, {"install-tool"}, {"install-health-maintenance"}, {"cleanup-residues"}, {"cleanup-health-state"}} {
 		if err := run(d, args...); err == nil {
 			t.Fatal("ignored active deployment", args)
 		}

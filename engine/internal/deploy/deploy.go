@@ -40,6 +40,7 @@ var (
 // Paths are the installed locations the deployment manages.
 type Paths struct {
 	State, Plist, Config, Binary, Tool, Rules, Cache, LogDir, Lock, BackupParent string
+	HealthLock                                                                   string
 }
 
 var Production = Paths{
@@ -53,6 +54,7 @@ var Production = Paths{
 	LogDir:       "/var/log/network-domain-proxy",
 	Lock:         "/var/db/network-domain-proxy.deploy.lock",
 	BackupParent: "/var/db",
+	HealthLock:   "/var/run/network-split-domestic-health.flock",
 }
 
 // CommandError reports a command that exited with a non-zero status.
