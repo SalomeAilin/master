@@ -314,6 +314,11 @@ func (d *Deployer) RemoveBackup(path string) error {
 // InstallTool updates only the maintenance executable using the existing atomic
 // installer, so adding maintenance commands never requires a proxy restart.
 func (d *Deployer) InstallTool() error {
+	// An older scheduled job can still call commands retired from this tool.
+	health, err := d.Run("/bin/launchctl", "print", healthLabel)
+	if err != nil || launchValues(health)["program"] != d.healthBinary() {
+		return errors.New("migrate the scheduled job with install-health-maintenance before installing this tool")
+	}
 	before, err := d.maintenanceState()
 	if err != nil {
 		return err

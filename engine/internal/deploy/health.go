@@ -19,8 +19,6 @@ func (d *Deployer) healthJob() *healthcheck.Job {
 	return &healthcheck.Job{Paths: d.Paths, Context: d.Context, Out: d.Out, Run: d.Run, Now: d.Now, Interrupted: d.checkInterrupted}
 }
 
-func (d *Deployer) HealthCheck() error { return d.healthJob().HealthCheck() }
-
 func (d *Deployer) preflightHealth() error {
 	if d.PreflightHealth != nil {
 		return d.PreflightHealth()

@@ -6,52 +6,40 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"network-owned-engine/internal/deploy"
-	"network-owned-engine/internal/healthcheck"
 )
 
 func TestCommandArgumentsRejectImplicitOrBatchDeletion(t *testing.T) {
-	for _, args := range [][]string{{"cleanup-policy-cache"}, {"cleanup-policy-cache", "/arbitrary/path"}, {"cleanup-policy-cache", strings.Repeat("g", 64)}, {"cleanup-policy-cache", strings.Repeat("a", 64), "extra"}} {
-		if validArguments(args) {
-			t.Fatal("unsafe cache command accepted", args)
-		}
-	}
-	if !validArguments([]string{"cleanup-policy-cache", strings.Repeat("a", 64)}) {
-		t.Fatal("reviewed cache digest rejected")
-	}
 	for _, args := range [][]string{nil, {"remove-backup"}, {"remove-backup", "one", "two"}, {"remove-backup", "--all", "one"}, {"backups", "one"}, {"cleanup-residues", "arbitrary-path"}, {"unknown"}, {"rollback", "one"}} {
 		if validArguments(args) {
 			t.Fatal("accepted", args)
 		}
 	}
-	for _, args := range [][]string{{"health-check"}, {"upgrade"}, {"install-tool"}, {"install-route-guard"}, {"install-health-maintenance"}, {"residues"}, {"cleanup-residues"}, {"cleanup-health-state"}, {"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}} {
+	for _, args := range [][]string{{"upgrade"}, {"install-tool"}, {"install-route-guard"}, {"install-health-maintenance"}, {"residues"}, {"cleanup-residues"}, {"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}} {
 		if !validArguments(args) {
 			t.Fatal("rejected", args)
 		}
 	}
 }
 
-func TestHealthCommandDoesNotBlockOnDeploymentLockWhenProbeIsNotDue(t *testing.T) {
+func TestRetiredCommandsFailBeforeAnySideEffect(t *testing.T) {
 	dir := t.TempDir()
-	d := deploy.New(deploy.Paths{Lock: filepath.Join(dir, "deploy.lock"), HealthLock: filepath.Join(dir, "health.lock"), BackupParent: dir}, "", &bytes.Buffer{})
-	d.Now = func() time.Time { return time.Unix(1000, 0) }
-	state := healthcheck.State{Interval: 120, LastProbe: 1000}
-	if err := os.WriteFile(filepath.Join(dir, "network-split-domestic-health.state"), state.Encode(), 0o600); err != nil {
-		t.Fatal(err)
+	d := deploy.New(deploy.Paths{Lock: filepath.Join(dir, "lock")}, "", &bytes.Buffer{})
+	d.Run = func(...string) (string, error) { t.Fatal("retired command invoked a system tool"); return "", nil }
+	for _, args := range [][]string{{"health-check"}, {"cleanup-health-state"}, {"cleanup-policy-cache", strings.Repeat("a", 64)}} {
+		if validArguments(args) {
+			t.Fatal("retired command accepted", args)
+		}
+		if err := run(d, args...); err == nil {
+			t.Fatal("retired command was silently redirected", args)
+		}
+		if strings.Contains(usage, args[0]) {
+			t.Fatal("retired command is still advertised", args)
+		}
 	}
-	release, err := d.Lock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-	d.Run = func(...string) (string, error) {
-		t.Fatal("idle health check invoked an external command")
-		return "", nil
-	}
-	if err := run(d, "health-check"); err != nil {
-		t.Fatal(err)
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatal("retired invocation created files", entries, err)
 	}
 }
 
@@ -63,7 +51,7 @@ func TestBackupCommandsRespectDeploymentLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}, {"install-tool"}, {"install-route-guard"}, {"install-health-maintenance"}, {"cleanup-residues"}, {"cleanup-health-state"}, {"cleanup-policy-cache", strings.Repeat("a", 64)}} {
+	for _, args := range [][]string{{"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}, {"install-tool"}, {"install-route-guard"}, {"install-health-maintenance"}, {"cleanup-residues"}} {
 		if err := run(d, args...); err == nil {
 			t.Fatal("ignored active deployment", args)
 		}

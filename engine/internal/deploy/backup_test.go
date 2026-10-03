@@ -51,7 +51,8 @@ func maintenanceFixture(t *testing.T) *Deployer {
 				t.Fatal("unexpected service mutation", args)
 			}
 			program := map[string]string{
-				Label: d.Binary,
+				Label:       d.Binary,
+				healthLabel: d.healthBinary(),
 				"system/com.local.network-split-dns-event-route-agent": filepath.Join(base, "sbin", "network-split-dns-event-route-agent"),
 				"system/homebrew.mxcl.dnsmasq":                         filepath.Join(base, "sbin", "dnsmasq-network-split"),
 			}[args[2]]
@@ -280,6 +281,40 @@ func TestInstallToolChangesOnlyMaintenanceExecutable(t *testing.T) {
 	before.Files[d.Tool] = after.Files[d.Tool]
 	if !reflect.DeepEqual(before, after) {
 		t.Fatal("unrelated runtime changed")
+	}
+}
+
+func TestInstallToolRefusesLegacyOrUnknownHealthEntry(t *testing.T) {
+	for _, program := range []string{"legacy-tool", "legacy-shell", "unavailable"} {
+		t.Run(program, func(t *testing.T) {
+			d := maintenanceFixture(t)
+			writeTestFile(t, filepath.Join(d.Root, ToolName), "new maintenance tool")
+			before, err := d.maintenanceState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := d.Run
+			d.Run = func(args ...string) (string, error) {
+				if len(args) == 3 && args[0] == "/bin/launchctl" && args[1] == "print" && args[2] == healthLabel {
+					switch program {
+					case "legacy-tool":
+						return "program = " + d.Tool + "\n", nil
+					case "legacy-shell":
+						return "program = /legacy/health.sh\n", nil
+					default:
+						return "", errors.New("unavailable")
+					}
+				}
+				return original(args...)
+			}
+			if err := d.InstallTool(); err == nil {
+				t.Fatal("unsafe tool update accepted")
+			}
+			after, err := d.maintenanceState()
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatal("runtime changed", err)
+			}
+		})
 	}
 }
 

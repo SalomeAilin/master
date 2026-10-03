@@ -16,19 +16,37 @@ import (
 	"network-owned-engine/internal/deploy"
 )
 
-const usage = "usage: network-domain-proxy-deploy install|upgrade|enable|rollback|install-tool|install-route-guard|install-health-maintenance|health-check|backups|inspect-backup <path>|remove-backup <path>|residues|cleanup-residues|cleanup-health-state|cleanup-policy-cache <sha256>"
+const usage = `usage: network-domain-proxy-deploy <command>
+
+All commands require administrator authorization.
+
+Inspect:
+  backups
+  inspect-backup <path>
+  residues
+
+Maintain:
+  remove-backup <path>
+  cleanup-residues
+
+Install or change settings:
+  install | upgrade
+  install-tool
+  install-route-guard
+  install-health-maintenance
+  enable | rollback
+
+The scheduled health job uses network-split-health, not this tool.`
 
 func validArguments(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	switch args[0] {
-	case "install", "upgrade", "enable", "rollback", "install-tool", "install-route-guard", "install-health-maintenance", "health-check", "backups", "residues", "cleanup-residues", "cleanup-health-state":
+	case "install", "upgrade", "enable", "rollback", "install-tool", "install-route-guard", "install-health-maintenance", "backups", "residues", "cleanup-residues":
 		return len(args) == 1
 	case "inspect-backup", "remove-backup":
 		return len(args) == 2
-	case "cleanup-policy-cache":
-		return len(args) == 2 && deploy.ValidPolicyCacheDigest(args[1])
 	}
 	return false
 }
@@ -81,9 +99,6 @@ func run(d *deploy.Deployer, args ...string) error {
 	if !validArguments(args) {
 		return fmt.Errorf("%s", usage)
 	}
-	if args[0] == "health-check" {
-		return d.HealthCheck()
-	}
 	release, err := d.Lock()
 	if err != nil {
 		return err
@@ -122,10 +137,8 @@ func run(d *deploy.Deployer, args ...string) error {
 		if err == nil {
 			err = json.NewEncoder(d.Out).Encode(residues)
 		}
-	case "cleanup-residues", "cleanup-health-state":
-		err = d.CleanupResidues(args[0] == "cleanup-health-state")
-	case "cleanup-policy-cache":
-		err = d.CleanupPolicyCache(args[1])
+	case "cleanup-residues":
+		err = d.CleanupResidues(false)
 	}
 	return err
 }
