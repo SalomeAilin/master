@@ -6,7 +6,7 @@ This repository backs up the active split-routing configuration for this Mac.
 
 | Directory | Contents |
 | --- | --- |
-| `scripts/` | zsh route guards, health check and installers |
+| `scripts/` | zsh route guards and installers |
 | `config/` | Domain/address policy and DNS/SSH configuration sources |
 | `config/launchd/` | LaunchDaemon property lists |
 | `config/chrome/` | Chrome preference snapshots |
@@ -212,19 +212,23 @@ removes eligible files after checking ownership, type, contents, age and open
 file use. The active health state, unrelated files, links, unrecognized data,
 recent writes and nonempty legacy DNS state are preserved.
 
-The existing health job invokes `cleanup-health-state` before taking its writer
-lock, including scheduled runs where no HTTP probe is due. The Go helper shares
-the same POSIX `fcntl` lock as `zsystem flock`, applies a five-minute grace period
-and recovers abandoned complete or partial health writes. When there are no
-eligible files it performs no external probes. Cleanup results go to the existing
-health log. Automatic recovery never removes the legacy DNS file or backups.
-The existing launchd `RunAtLoad` and 30-second schedule remain the startup path.
+The existing health job directly runs `network-domain-proxy-deploy health-check`.
+Go holds the POSIX `fcntl` writer lock across orphan recovery, probing and state
+publication, including scheduled invocations where no HTTP probe is due. It
+applies a five-minute grace period to abandoned complete or partial health writes.
+Cleanup results use the existing health log. Automatic recovery never removes
+the legacy DNS file or backups. The existing launchd `RunAtLoad` and 30-second
+schedule remain the startup path; there is no health-check shell entry point.
 
 To install this integration, stage the compiled deployment tool together with
-`scripts/network-split-domestic-health.sh` and run `install-health-maintenance`
-with administrator authorization. It publishes the tool before the existing
-health entry point, verifies service PIDs and installed hashes, and performs the
-initial state cleanup under the writer lock. No additional job is installed.
+`config/launchd/com.local.network-split-domestic-health.plist` and run
+`install-health-maintenance` with administrator authorization. It checks a real
+native HTTP request and the wired route before changing files, snapshots the
+prior tool/job/legacy script privately, reloads only the existing health job,
+and removes the legacy script after native activation succeeds. Failure restores
+the prior files and job; incomplete rollback retains and reports its recovery
+directory. Successful activation removes temporary rollback material and verifies
+that the proxy, DNS and observer PIDs and unrelated installed files are unchanged.
 
 ### Verification
 
@@ -354,9 +358,9 @@ Offline checks: `zsh tests/remote_access.zsh`.
 - `scripts/china-route.sh` -> `/usr/local/sbin/china-route.sh`
 - `engine/cmd/network-split-dns-event-route-agent` (Go) -> `/usr/local/sbin/network-split-dns-event-route-agent`
 - `engine/cmd/network-split-policy` (Go) -> `/usr/local/sbin/network-split-policy` (address policy the shell guards call)
-- `scripts/network-split-domestic-health.sh` -> `/usr/local/sbin/`
+- `engine/internal/healthcheck` -> `network-domain-proxy-deploy health-check` (direct launchd entry)
 - Compiled independent `network-domain-engine` -> `/usr/local/libexec/network-domain-engine`
-- `engine/cmd/network-domain-proxy-deploy` (Go) -> `/usr/local/sbin/network-domain-proxy-deploy` (manual maintenance entry, not a daemon)
+- `engine/cmd/network-domain-proxy-deploy` (Go) -> `/usr/local/sbin/network-domain-proxy-deploy` (maintenance commands and the scheduled one-shot health check)
 - `config/dnsmasq-network-split.conf` -> `/usr/local/etc/`
 - `config/china_ip_list.txt` -> `/usr/local/etc/`
 - `config/domestic_domains.conf` -> `/usr/local/etc/`
@@ -373,11 +377,11 @@ Deploy only the files listed in this mapping. Retired implementations remain
 available in Git history, not in the current deployment or test suite. The
 former engine's license notice is retained in `archive/sing-box-LICENSE`.
 
-### Script Roles
+### Program Roles
 
 | Role | Files | Use on this Mac |
 | --- | --- | --- |
-| Runtime | Native proxy engine, Go DNS event agent, `scripts/network-split-guard.sh`, `scripts/china-route.sh`, `scripts/network-split-domestic-health.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
+| Runtime | Native proxy engine, Go DNS event agent, Go `health-check`, `scripts/network-split-guard.sh`, `scripts/china-route.sh` | Managed by the six active launchd jobs, together with the external dnsmasq binary; do not run duplicate instances manually |
 | Shared dependency | `engine/internal/policy` (built into the agent) and the `network-split-policy` program | Address policy for the event agent and both routing scripts; not a daemon |
 | Maintenance | `network-domain-proxy-config`, `network-domain-proxy-deploy`, `network-domain-proxy-evidence` from `engine/cmd/`, `scripts/deploy-security-update.zsh`, `scripts/deploy-remote-access.zsh`, `scripts/install-network-split-dns-event-route-agent.sh` | Manual build, deployment and installation tools, not background jobs; installation can restart services |
 | Verification | Files in `tests/` and Go package tests in `engine/` | Retained tests, not launchd jobs; the evidence tool and the `NETWORK_SPLIT_LIVE` integration test use the live network |
@@ -464,18 +468,20 @@ single endpoint cannot establish the health of all domestic or foreign sites.
 Reduced probe count is measurable; latency comparisons here are safeguards,
 not evidence that reducing probes caused a website speed improvement.
 
-`zsh tests/recovery.zsh` exercises the actual program with mocked external
-commands and a simulated clock. A healthy one-hour replay makes 37 HTTP probes
+The Go tests in `engine/internal/healthcheck` exercise the actual scheduler with
+a simulated clock, native HTTP/TLS fixtures and mocked macOS route/service APIs.
+A healthy one-hour replay makes 37 HTTP probes
 across 121 scheduled invocations instead of 121, including the initial baseline
 and trials. The steady 120-second stage targets 75% fewer probes than 30 seconds;
 these are replay/count results, not measured live traffic or playback gains.
 
-Deployment is separate from source acceptance: after administrator approval,
-replace only the mapped `scripts/network-split-domestic-health.sh` atomically while
-holding its existing health lock. Validate syntax and retain the prior deployed
-file until the first scheduled run and state/log checks pass. Do not restart
-the proxy, DNS, route guard or event observer. Rollback restores that one file;
-the preceding version can still read `failure_count` from the extended state.
+HTTP, scheduling, bounded state parsing and atomic publication are native Go.
+The request uses direct IPv4, certificate-verified TLS, the same endpoint and
+timeouts, and a 4 MiB response cap. The expected wired interface comes from the
+installed proxy configuration and its gateway from the scoped macOS route.
+An unavailable route query does not count as confirmed drift. The private state
+format stays compatible with the prior version. See Backup Maintenance above
+for the transactional health-job migration and rollback procedure.
 
 Review interface names, gateways, DNS addresses, ownership, and launchd state
 before restoring on another Mac or after a major network topology change.

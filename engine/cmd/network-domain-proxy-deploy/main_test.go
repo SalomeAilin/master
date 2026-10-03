@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"network-owned-engine/internal/deploy"
+	"network-owned-engine/internal/healthcheck"
 )
 
 func TestCommandArgumentsRejectImplicitOrBatchDeletion(t *testing.T) {
@@ -15,10 +17,32 @@ func TestCommandArgumentsRejectImplicitOrBatchDeletion(t *testing.T) {
 			t.Fatal("accepted", args)
 		}
 	}
-	for _, args := range [][]string{{"upgrade"}, {"install-tool"}, {"install-health-maintenance"}, {"residues"}, {"cleanup-residues"}, {"cleanup-health-state"}, {"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}} {
+	for _, args := range [][]string{{"health-check"}, {"upgrade"}, {"install-tool"}, {"install-health-maintenance"}, {"residues"}, {"cleanup-residues"}, {"cleanup-health-state"}, {"backups"}, {"inspect-backup", "one"}, {"remove-backup", "one"}} {
 		if !validArguments(args) {
 			t.Fatal("rejected", args)
 		}
+	}
+}
+
+func TestHealthCommandDoesNotBlockOnDeploymentLockWhenProbeIsNotDue(t *testing.T) {
+	dir := t.TempDir()
+	d := deploy.New(deploy.Paths{Lock: filepath.Join(dir, "deploy.lock"), HealthLock: filepath.Join(dir, "health.lock"), BackupParent: dir}, "", &bytes.Buffer{})
+	d.Now = func() time.Time { return time.Unix(1000, 0) }
+	state := healthcheck.State{Interval: 120, LastProbe: 1000}
+	if err := os.WriteFile(filepath.Join(dir, "network-split-domestic-health.state"), state.Encode(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release, err := d.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	d.Run = func(...string) (string, error) {
+		t.Fatal("idle health check invoked an external command")
+		return "", nil
+	}
+	if err := run(d, "health-check"); err != nil {
+		t.Fatal(err)
 	}
 }
 

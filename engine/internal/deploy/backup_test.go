@@ -23,6 +23,7 @@ func maintenanceFixture(t *testing.T) *Deployer {
 		Rules:  filepath.Join(base, "rules"), Cache: filepath.Join(base, "cache"),
 		Lock: filepath.Join(base, "deploy.lock"), BackupParent: filepath.Join(base, "backups"),
 		HealthLock: filepath.Join(base, "health.flock"),
+		HealthLog:  filepath.Join(base, "health.log"),
 	}
 	for _, dir := range []string{"libexec", "sbin", "etc", "launchd", "rules", "cache", "backups", "stage"} {
 		if err := os.Mkdir(filepath.Join(base, dir), 0o700); err != nil {
@@ -33,8 +34,9 @@ func maintenanceFixture(t *testing.T) *Deployer {
 	d.Chown = noChown
 	files := []string{paths.Binary, paths.Tool, paths.Config, paths.Plist,
 		filepath.Join(base, "etc", "dnsmasq-network-split.conf"),
-		filepath.Join(base, "launchd", "com.local.network-split-dns-event-route-agent.plist")}
-	for _, name := range []string{"network-split-policy", "network-split-dns-event-route-agent", "dnsmasq-network-split", "china-route.sh", "network-split-guard.sh", healthScript} {
+		filepath.Join(base, "launchd", "com.local.network-split-dns-event-route-agent.plist"),
+		filepath.Join(base, "launchd", healthPlistName)}
+	for _, name := range []string{"network-split-policy", "network-split-dns-event-route-agent", "dnsmasq-network-split", "china-route.sh", "network-split-guard.sh", legacyHealthScript} {
 		files = append(files, filepath.Join(base, "sbin", name))
 	}
 	for _, path := range files {
@@ -42,11 +44,6 @@ func maintenanceFixture(t *testing.T) *Deployer {
 	}
 	d.Run = func(args ...string) (string, error) {
 		switch args[0] {
-		case "/bin/zsh":
-			if len(args) != 3 || args[1] != "-n" {
-				t.Fatal("unexpected shell execution", args)
-			}
-			return "", nil
 		case "/usr/bin/pgrep", "/usr/sbin/lsof":
 			return "", &CommandError{Args: args, Code: 1}
 		case "/bin/launchctl":

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,14 +16,14 @@ import (
 	"network-owned-engine/internal/deploy"
 )
 
-const usage = "usage: network-domain-proxy-deploy install|upgrade|enable|rollback|install-tool|install-health-maintenance|backups|inspect-backup <path>|remove-backup <path>|residues|cleanup-residues|cleanup-health-state"
+const usage = "usage: network-domain-proxy-deploy install|upgrade|enable|rollback|install-tool|install-health-maintenance|health-check|backups|inspect-backup <path>|remove-backup <path>|residues|cleanup-residues|cleanup-health-state"
 
 func validArguments(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	switch args[0] {
-	case "install", "upgrade", "enable", "rollback", "install-tool", "install-health-maintenance", "backups", "residues", "cleanup-residues", "cleanup-health-state":
+	case "install", "upgrade", "enable", "rollback", "install-tool", "install-health-maintenance", "health-check", "backups", "residues", "cleanup-residues", "cleanup-health-state":
 		return len(args) == 1
 	case "inspect-backup", "remove-backup":
 		return len(args) == 2
@@ -53,6 +54,9 @@ func main() {
 		os.Exit(1)
 	}
 	d := deploy.New(deploy.Production, filepath.Dir(executable), os.Stdout)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.Context = ctx
 	// An interrupt takes effect at the next step boundary, where an upgrade
 	// rolls back instead of leaving half-replaced files.
 	var interrupted atomic.Bool
@@ -61,6 +65,7 @@ func main() {
 	go func() {
 		for range signals {
 			interrupted.Store(true)
+			cancel()
 		}
 	}()
 	d.Interrupted = interrupted.Load
@@ -73,6 +78,9 @@ func main() {
 func run(d *deploy.Deployer, args ...string) error {
 	if !validArguments(args) {
 		return fmt.Errorf("%s", usage)
+	}
+	if args[0] == "health-check" {
+		return d.HealthCheck()
 	}
 	release, err := d.Lock()
 	if err != nil {

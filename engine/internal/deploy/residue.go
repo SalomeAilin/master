@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	healthScript     = "network-split-domestic-health.sh"
-	healthState      = "network-split-domestic-health.state"
-	healthTempPrefix = healthState + ".tmp."
-	legacyDNSState   = "network-split-dns-routes.json"
-	residueGrace     = 5 * time.Minute
+	legacyHealthScript = "network-split-domestic-health.sh"
+	healthState        = "network-split-domestic-health.state"
+	healthTempPrefix   = healthState + ".tmp."
+	legacyDNSState     = "network-split-dns-routes.json"
+	residueGrace       = 5 * time.Minute
 )
 
 var errHealthBusy = errors.New("health state writer is active; no residue removed")
@@ -253,56 +253,4 @@ func (d *Deployer) cleanupResiduesLocked(healthOnly bool) error {
 	}
 	fmt.Fprintf(d.Out, "State residues: removed=%d bytes=%d remaining=%d; runtime unchanged\n", removed, bytes, len(remaining))
 	return nil
-}
-
-// Install the existing health-check entry point after the tool it calls, then
-// clear reviewed state residue while holding the same lock as its writer.
-func (d *Deployer) InstallHealthMaintenance() error {
-	var release func()
-	var err error
-	for attempt := 0; attempt < 100; attempt++ {
-		release, err = d.lockHealthState()
-		if !errors.Is(err, errHealthBusy) {
-			break
-		}
-		if err := d.checkInterrupted(); err != nil {
-			return err
-		}
-		d.Sleep(100 * time.Millisecond)
-	}
-	if err != nil {
-		return err
-	}
-	defer release()
-	source := filepath.Join(d.Root, healthScript)
-	if _, err := d.Run("/bin/zsh", "-n", source); err != nil {
-		return err
-	}
-	file, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	digest, _, err := hashFile(file)
-	file.Close()
-	if err != nil {
-		return err
-	}
-	if err := d.InstallTool(); err != nil {
-		return err
-	}
-	before, err := d.maintenanceState()
-	if err != nil {
-		return err
-	}
-	target := filepath.Join(filepath.Dir(d.Tool), healthScript)
-	if err := d.InstallFile(source, target, 0o755); err != nil {
-		return err
-	}
-	before.Files[target] = digest
-	after, err := d.maintenanceState()
-	if err != nil || !reflect.DeepEqual(before, after) {
-		return errors.New("health maintenance installed; unchanged runtime could not be confirmed")
-	}
-	fmt.Fprintln(d.Out, "Existing health-check entry updated; service PIDs unchanged")
-	return d.cleanupResiduesLocked(false)
 }

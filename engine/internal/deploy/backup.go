@@ -300,9 +300,16 @@ func (d *Deployer) maintenanceState() (maintenanceState, error) {
 	}
 	files := []string{d.Binary, d.Config, d.Plist, d.Tool,
 		filepath.Join(filepath.Dir(d.Config), "dnsmasq-network-split.conf"),
-		filepath.Join(filepath.Dir(d.Plist), "com.local.network-split-dns-event-route-agent.plist")}
-	for _, name := range []string{"network-split-policy", "network-split-dns-event-route-agent", "dnsmasq-network-split", "china-route.sh", "network-split-guard.sh", healthScript} {
+		filepath.Join(filepath.Dir(d.Plist), "com.local.network-split-dns-event-route-agent.plist"),
+		filepath.Join(filepath.Dir(d.Plist), healthPlistName)}
+	for _, name := range []string{"network-split-policy", "network-split-dns-event-route-agent", "dnsmasq-network-split", "china-route.sh", "network-split-guard.sh"} {
 		files = append(files, filepath.Join(sbin, name))
+	}
+	legacy := filepath.Join(sbin, legacyHealthScript)
+	if _, err := os.Lstat(legacy); err == nil {
+		files = append(files, legacy)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return state, err
 	}
 	for _, path := range files {
 		fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)

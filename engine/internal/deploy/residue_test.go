@@ -4,10 +4,11 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -145,26 +146,45 @@ func TestResidueCleanupRefusesOpenOrChangedFiles(t *testing.T) {
 	}
 }
 
-func TestHealthCleanupLockInteroperatesWithZshWriter(t *testing.T) {
+func TestHealthLockChild(t *testing.T) {
+	mode := os.Getenv("NETWORK_HEALTH_LOCK_TEST")
+	if mode == "" {
+		return
+	}
+	d := New(Paths{HealthLock: os.Getenv("NETWORK_HEALTH_LOCK_PATH")}, "", io.Discard)
+	release, err := d.lockHealthState()
+	if errors.Is(err, errHealthBusy) {
+		fmt.Println("busy")
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	fmt.Println("locked")
+	if mode == "hold" {
+		var data [1]byte
+		os.Stdin.Read(data[:])
+	}
+}
+
+func TestHealthCleanupLockExcludesOtherNativeProcesses(t *testing.T) {
 	d := maintenanceFixture(t)
 	release, err := d.lockHealthState()
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("/bin/zsh", "-c", `zmodload zsh/system && zsystem flock -t 0 "$1"`, "--", d.HealthLock)
+	command := exec.Command(os.Args[0], "-test.run=^TestHealthLockChild$")
+	command.Env = append(os.Environ(), "NETWORK_HEALTH_LOCK_TEST=try", "NETWORK_HEALTH_LOCK_PATH="+d.HealthLock)
 	lockedOutput, err := command.CombinedOutput()
 	release()
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) || (exit.ExitCode() != 1 && exit.ExitCode() != 2) {
-		t.Fatal("zsh writer was not excluded by the Go lock", err, string(lockedOutput))
-	}
-	unlocked := exec.Command("/bin/zsh", "-c", `zmodload zsh/system && zsystem flock -t 0 "$1"`, "--", d.HealthLock)
-	if output, err := unlocked.CombinedOutput(); err != nil {
-		t.Fatal("zsh could not acquire the released lock", err, string(output))
+	if err != nil || !strings.HasPrefix(string(lockedOutput), "busy\n") {
+		t.Fatal("native writer was not excluded", err, string(lockedOutput))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	command = exec.CommandContext(ctx, "/bin/zsh", "-c", "zmodload zsh/system || exit 1\nzsystem flock -t 0 -f writer_lock \"$1\" || exit 1\nprint locked\nread -r release_line", "--", d.HealthLock)
+	command = exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHealthLockChild$")
+	command.Env = append(os.Environ(), "NETWORK_HEALTH_LOCK_TEST=hold", "NETWORK_HEALTH_LOCK_PATH="+d.HealthLock)
 	input, err := command.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -179,43 +199,12 @@ func TestHealthCleanupLockInteroperatesWithZshWriter(t *testing.T) {
 	defer func() { input.Close(); cancel(); command.Wait() }()
 	line, err := bufio.NewReader(output).ReadString('\n')
 	if err != nil || line != "locked\n" {
-		t.Fatal("zsh lock was not acquired", line, err)
+		t.Fatal("native child lock was not acquired", line, err)
 	}
 	if release, err := d.lockHealthState(); !errors.Is(err, errHealthBusy) {
 		if release != nil {
 			release()
 		}
-		t.Fatal("Go cleanup ignored the zsh writer lock", err)
-	}
-}
-
-func TestInstallHealthMaintenancePreservesRuntimeAndCleansState(t *testing.T) {
-	d := maintenanceFixture(t)
-	writeTestFile(t, filepath.Join(d.Root, ToolName), "new maintenance binary")
-	writeTestFile(t, filepath.Join(d.Root, healthScript), "#!/bin/zsh\n/usr/local/sbin/network-domain-proxy-deploy cleanup-health-state\n")
-	residue := makeResidue(t, d, healthTempPrefix+"123", "failure_count=0\nlast_refresh=0\n", true)
-	active := makeResidue(t, d, healthState, "active state", true)
-	before, err := d.maintenanceState()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := d.InstallHealthMaintenance(); err != nil {
-		t.Fatal(err)
-	}
-	after, err := d.maintenanceState()
-	if err != nil {
-		t.Fatal(err)
-	}
-	before.Files[d.Tool] = after.Files[d.Tool]
-	health := filepath.Join(filepath.Dir(d.Tool), healthScript)
-	before.Files[health] = after.Files[health]
-	if !reflect.DeepEqual(before, after) {
-		t.Fatal("unrelated runtime changed")
-	}
-	if _, err := os.Stat(residue); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("old residue retained", err)
-	}
-	if data, err := os.ReadFile(active); err != nil || string(data) != "active state" {
-		t.Fatal("active state changed", err)
+		t.Fatal("Go cleanup ignored the other native writer", err)
 	}
 }

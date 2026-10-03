@@ -39,6 +39,7 @@ var (
 
 // Paths are the installed locations the deployment manages.
 type Paths struct {
+	HealthLog                                                                    string
 	State, Plist, Config, Binary, Tool, Rules, Cache, LogDir, Lock, BackupParent string
 	HealthLock                                                                   string
 }
@@ -55,6 +56,7 @@ var Production = Paths{
 	Lock:         "/var/db/network-domain-proxy.deploy.lock",
 	BackupParent: "/var/db",
 	HealthLock:   "/var/run/network-split-domestic-health.flock",
+	HealthLog:    "/var/log/network-split-domestic-health.log",
 }
 
 // CommandError reports a command that exited with a non-zero status.
@@ -90,16 +92,19 @@ type Record struct {
 // these fields; nil step overrides use the real implementations.
 type Deployer struct {
 	Paths
-	Root         string // staging directory holding the new files
-	Out          io.Writer
-	Run          func(args ...string) (string, error)
-	ProcessAlive func(pid int) (bool, error)
-	Sleep        func(time.Duration)
-	Now          func() time.Time
-	Dial         func(address string, timeout time.Duration) (io.Closer, error)
-	Chown        func(path string, uid, gid uint32) error
-	Rename       func(oldpath, newpath string) error
-	Interrupted  func() bool
+	Context         context.Context
+	PreflightHealth func() error
+	AcceptHealth    func(int64) error
+	Root            string // staging directory holding the new files
+	Out             io.Writer
+	Run             func(args ...string) (string, error)
+	ProcessAlive    func(pid int) (bool, error)
+	Sleep           func(time.Duration)
+	Now             func() time.Time
+	Dial            func(address string, timeout time.Duration) (io.Closer, error)
+	Chown           func(path string, uid, gid uint32) error
+	Rename          func(oldpath, newpath string) error
+	Interrupted     func() bool
 
 	ValidateStage func() (map[string]any, error)
 	Preflight     func(config map[string]any) error
@@ -112,7 +117,7 @@ type Deployer struct {
 }
 
 func New(paths Paths, root string, out io.Writer) *Deployer {
-	return &Deployer{Paths: paths, Root: root, Out: out, Run: runCommand, ProcessAlive: processAlive,
+	return &Deployer{Paths: paths, Context: context.Background(), Root: root, Out: out, Run: runCommand, ProcessAlive: processAlive,
 		Sleep: time.Sleep, Now: time.Now, Interrupted: func() bool { return false },
 		Dial: func(address string, timeout time.Duration) (io.Closer, error) {
 			return net.DialTimeout("tcp", address, timeout)
