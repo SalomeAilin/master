@@ -534,7 +534,13 @@ func TestUnifiedAcceptanceImmediatelyReportsAWorkerStartupFailure(t *testing.T) 
 			if job.Label == "com.local.network-split-log-guard" {
 				exit = "78: EX_CONFIG"
 			}
-			return fmt.Sprintf("path = %s\nprogram = %s\nstate = %s\npid = %d\nlast exit code = %s\n", job.Path, job.Program, state, pid, exit), nil
+			var arguments []string
+			for _, definition := range d.managedJobs(f.config) {
+				if definition.Label == job.Label {
+					arguments = definition.Arguments()
+				}
+			}
+			return fmt.Sprintf("path = %s\nprogram = %s\narguments = {\n%s\n}\nstate = %s\npid = %d\nlast exit code = %s\n", job.Path, job.Program, strings.Join(arguments, "\n"), state, pid, exit), nil
 		}
 		t.Fatal("unexpected operation", args)
 		return "", nil

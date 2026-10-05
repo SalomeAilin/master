@@ -11,7 +11,7 @@ import (
 	"syscall"
 )
 
-const version = "0.3.1-native-dns"
+const version = "0.3.2-native-dns"
 
 func command(arguments []string) error {
 	if len(arguments) == 0 || len(arguments) == 1 && (arguments[0] == "--help" || arguments[0] == "-h") {

@@ -141,6 +141,9 @@ func (d *Deployer) nativePreflight(c service.Config) (resultErr error) {
 }
 
 func (d *Deployer) probeNativeDNS(address string) error {
+	if d.probeDNS != nil {
+		return d.probeDNS(address)
+	}
 	for _, network := range []string{"udp4", "tcp4"} {
 		client := &dns.Client{Net: network, Timeout: 8 * time.Second}
 		for _, test := range []struct {
@@ -153,9 +156,15 @@ func (d *Deployer) probeNativeDNS(address string) error {
 			q.SetQuestion(test.name, test.kind)
 			m, _, err := client.ExchangeContext(d.Context, q, address)
 			if err != nil || m == nil {
-				return fmt.Errorf("native DNS preflight %s %s: %w", network, test.name, err)
+				if err == nil {
+					err = errors.New("empty DNS response")
+				}
+				return fmt.Errorf("native DNS preflight %s %s: %w", network, test.name, retryableProbe(err))
 			}
 			if m.Rcode != test.code {
+				if m.Rcode == dns.RcodeServerFailure {
+					return &retryableAcceptance{fmt.Errorf("native DNS upstream unavailable: %s", test.name)}
+				}
 				return fmt.Errorf("native DNS preflight %s returned rcode %d", test.name, m.Rcode)
 			}
 			found := false

@@ -27,6 +27,9 @@ func (d *Deployer) previousHealthProbe() int64 {
 func (d *Deployer) acceptHealthSample(previous int64) error {
 	for attempt := 0; attempt < 31; attempt++ {
 		state, err := healthcheck.Read(filepath.Join(d.BackupParent, healthState), d.Now().Unix())
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
 		if err == nil {
 			if state.LastProbe > 0 && state.LastProbe != previous && state.Failures == 0 {
 				fmt.Fprintf(d.Out, "Scheduled native health probe accepted: last_probe=%d failures=0\n", state.LastProbe)
@@ -40,7 +43,7 @@ func (d *Deployer) acceptHealthSample(previous int64) error {
 			d.Sleep(5 * time.Second)
 		}
 	}
-	return errors.New("native scheduled health probe was not accepted within 150 seconds")
+	return &retryableAcceptance{errors.New("native scheduled health probe was not accepted within 150 seconds")}
 }
 
 func fileDigest(path string) (string, error) {

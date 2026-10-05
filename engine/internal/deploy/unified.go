@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"network-owned-engine/internal/dnsservice"
+	"network-owned-engine/internal/healthcheck"
 	"network-owned-engine/internal/runtimecheck"
 	"network-owned-engine/internal/service"
 	"network-owned-engine/internal/statuspage"
@@ -142,38 +143,38 @@ func (d *Deployer) waitUnified(c service.Config, previous int64, started time.Ti
 	if d.acceptUnified != nil {
 		return d.acceptUnified(d.layout(c).Config, previous)
 	}
-	for attempt := 0; attempt < 90; attempt++ {
-		ready := true
-		for _, job := range d.unifiedJobs(c) {
-			out, err := d.Run("/bin/launchctl", "print", job.Domain+"/"+job.Label)
+	var baseline runtimecheck.State
+	return d.acceptanceRounds(func(attempt int) error {
+		if err := d.waitUnifiedWorkers(c); err != nil {
+			return err
+		}
+		state, err := d.acceptanceState(c)
+		if err != nil {
+			return err
+		}
+		if attempt == 0 {
+			baseline = state
+		} else {
+			if err := sameAcceptanceState(baseline, state); err != nil {
+				return err
+			}
+			health, err := healthcheck.Read(filepath.Join(d.BackupParent, healthState), d.Now().Unix())
 			if err != nil {
-				ready = false
-				break
+				return err
 			}
-			info := service.ParseLaunch(out)
-			if info.Program != job.Program || info.Path != job.Path {
-				ready = false
-				break
+			if health.LastProbe <= 0 {
+				return errors.New("no valid health baseline for complete recheck")
 			}
-			switch job.Label {
-			case "homebrew.mxcl.dnsmasq", service.NativeDNSLabel, "com.local.network-domain-proxy", "com.local.network-split-dns-event-route-agent":
-				if info.State != "running" || info.PID <= 0 {
-					ready = false
-				}
-			default:
-				if info.State == "not running" && info.Exit != "" && info.Exit != "0" && info.Exit != "(never exited)" {
-					return fmt.Errorf("worker %s failed: exit %s", job.Label, info.Exit)
-				}
-				if info.State != "not running" || info.Exit != "0" {
-					ready = false
-				}
+			previous, started = health.LastProbe, d.Now()
+			if err := d.refreshStatus(c); err != nil {
+				return err
 			}
 		}
-		if ready {
+		probeErr := func() error {
 			if err := d.acceptHealthSample(previous); err != nil {
 				return err
 			}
-			if err := acceptStatusReport(c, started); err != nil {
+			if err := d.waitStatusReport(c, started); err != nil {
 				return err
 			}
 			if c.Version == 2 {
@@ -184,6 +185,56 @@ func (d *Deployer) waitUnified(c service.Config, previous int64, started time.Ti
 				}
 			}
 			return d.health(ProxyPort)
+		}()
+		if err := d.waitUnifiedWorkers(c); err != nil {
+			return err
+		}
+		after, err := d.acceptanceState(c)
+		if err != nil {
+			return err
+		}
+		if err := sameAcceptanceState(baseline, after); err != nil {
+			return err
+		}
+		return probeErr
+	})
+}
+
+func (d *Deployer) waitUnifiedWorkers(c service.Config) error {
+	for attempt := 0; attempt < 90; attempt++ {
+		if err := d.checkInterrupted(); err != nil {
+			return err
+		}
+		ready := true
+		for _, job := range d.managedJobs(c) {
+			out, err := d.Run("/bin/launchctl", "print", "system/"+job.Label)
+			if err != nil {
+				if code, known := exitCode(err); !known || code != 113 {
+					return err
+				}
+				ready = false
+				break
+			}
+			info := service.ParseLaunch(out)
+			if !job.Matches(info) {
+				return fmt.Errorf("worker identity or arguments changed: %s", job.Label)
+			}
+			if info.Exit != "" && info.Exit != "0" && info.Exit != "(never exited)" {
+				return fmt.Errorf("worker %s failed: exit %s", job.Label, info.Exit)
+			}
+			switch job.Label {
+			case "homebrew.mxcl.dnsmasq", service.NativeDNSLabel, "com.local.network-domain-proxy", "com.local.network-split-dns-event-route-agent":
+				if info.State != "running" || info.PID <= 0 {
+					ready = false
+				}
+			default:
+				if info.State != "not running" || info.Exit != "0" {
+					ready = false
+				}
+			}
+		}
+		if ready {
+			return nil
 		}
 		if err := d.checkInterrupted(); err != nil {
 			return err
@@ -207,11 +258,8 @@ func acceptStatusReport(c service.Config, since time.Time) error {
 	if err != nil {
 		return fmt.Errorf("status receipt inspection failed: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Size() > 4<<20 {
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > 4<<20 {
 		return errors.New("status receipt is not a bounded regular file")
-	}
-	if !since.IsZero() && !info.ModTime().After(since) {
-		return fmt.Errorf("status receipt is stale: modified=%s required_after=%s", info.ModTime().Format(time.RFC3339Nano), since.Format(time.RFC3339Nano))
 	}
 	home, err := root.Stat(".")
 	if err != nil || info.Sys().(*syscall.Stat_t).Uid != home.Sys().(*syscall.Stat_t).Uid || info.Sys().(*syscall.Stat_t).Nlink != 1 {
@@ -228,19 +276,22 @@ func acceptStatusReport(c service.Config, since time.Time) error {
 	}
 	data, err := io.ReadAll(io.LimitReader(file, (4<<20)+1))
 	var snapshot statuspage.Snapshot
-	if err != nil || len(data) > 4<<20 || json.Unmarshal(data, &snapshot) != nil || snapshot.State != "OK" || len(snapshot.Checks) == 0 || len(snapshot.Domains) == 0 {
+	if err != nil || len(data) > 4<<20 || json.Unmarshal(data, &snapshot) != nil || len(snapshot.Checks) == 0 || len(snapshot.Domains) == 0 {
 		return errors.New("status receipt did not contain healthy checks and domains")
 	}
 	// The old state format is sufficient for a read-only preflight. Activation
 	// always supplies a cutoff and requires a receipt from the new worker.
 	if since.IsZero() {
-		return nil
+		return statusAcceptance(snapshot)
 	}
 	digest, err := hex.DecodeString(snapshot.HTMLSHA256)
-	if err != nil || len(digest) != 32 || snapshot.HTMLPath != c.Status.Output || snapshot.HTMLBytes <= 0 || snapshot.HTMLBytes > 4<<20 || !snapshot.Checked.After(since) || !snapshot.Published.After(since) {
+	if err != nil || len(digest) != 32 || snapshot.HTMLPath != c.Status.Output || snapshot.HTMLBytes <= 0 || snapshot.HTMLBytes > 4<<20 || snapshot.Checked.IsZero() || snapshot.Published.IsZero() {
 		return errors.New("status worker did not publish a fresh page receipt")
 	}
-	return nil
+	if !info.ModTime().After(since) || !snapshot.Checked.After(since) || !snapshot.Published.After(since) {
+		return errStatusNotFresh
+	}
+	return statusAcceptance(snapshot)
 }
 
 func (d *Deployer) retiredPrograms(c service.Config) []string {

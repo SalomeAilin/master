@@ -61,6 +61,7 @@ type Deployer struct {
 	preflightOnly bool
 	nativeDNS     bool
 	preflightDNS  func(serviceConfigPath string) error
+	probeDNS      func(address string) error
 	userFiles     *ownedUserFiles
 	unifiedLayout *unifiedLayout
 	acceptUnified func(serviceConfigPath string, previous int64) error
@@ -385,7 +386,7 @@ func (d *Deployer) health(port int) error {
 			args = append(args, "--head")
 		}
 		if _, err := d.Run(append(args, url)...); err != nil {
-			return err
+			return retryableHTTP(err)
 		}
 	}
 	return nil
@@ -539,6 +540,9 @@ func (d *Deployer) ensureDirectory(path string, mode os.FileMode, owner string) 
 }
 
 func (d *Deployer) checkInterrupted() error {
+	if d.Context != nil && d.Context.Err() != nil {
+		return d.Context.Err()
+	}
 	if d.Interrupted() {
 		return errors.New("deployment interrupted")
 	}
