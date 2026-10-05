@@ -2,13 +2,13 @@
 
 境外走 Wi-Fi，国内走有线；代理连接失败时不换到另一条线路。
 
-**当前进度：0.2.0 统一程序的源码已整理，线上仍是原有服务，尚未完成管理员授权后的迁移验收。** 构建、推送与上线是三件事。
+**2026-10-05 已上线 0.2.0-unified。** 运行程序与构建产物哈希一致，代理、DNS 和地址策略配置未变；新健康样本、状态页发布回执及真实连接出口已核对。此次没有重启 Mac 或人为断开 Wi-Fi，短期验收不等于长期稳定保证。
 
 ## 平时使用
 
 正常联网不需要手动运行维护命令。本机 `network-split-status.html` 每五分钟更新；出现异常先对照发生时间查日志和实际连接，不靠反复安装、重启或清空缓存代替排查。
 
-统一程序安装后，只使用一个入口：
+现在只使用一个入口：
 ```sh
 /usr/local/libexec/network-domain-engine status
 /usr/local/libexec/network-domain-engine --help
@@ -47,7 +47,7 @@ GOTOOLCHAIN=go1.26.8 go test -tags integration -run Integration -timeout 5m .
 
 在仓库根目录运行 `zsh tests/remote_access.zsh` 和 `git diff --check`。SSH 测试只操作临时配置，不安装远程登录。路由策略、切换顺序、锁、DNS 恢复与迁移回滚的回归检查已在 Go 包内，不再提取旧脚本函数执行。
 
-[GitHub 检查](.github/workflows/checks.yml)运行离线测试，不自动部署。显式设置 `NETWORK_SPLIT_LIVE=1` 才会运行真实双线集成测试，`NETWORK_SPLIT_RULES` 指定种子目录。错误网卡测试不等于真实拔掉 Wi-Fi。
+[GitHub 检查](.github/workflows/checks.yml)运行离线测试，并在系统服务域验证隔离任务的注册和普通用户启动，随后卸载测试任务；不部署或运行生产网络业务。显式设置 `NETWORK_SPLIT_LIVE=1` 才会运行真实双线集成测试，`NETWORK_SPLIT_RULES` 指定种子目录。错误网卡测试不等于真实拔掉 Wi-Fi。
 
 ## 构建
 
@@ -75,7 +75,7 @@ sudo "$STAGE/network-domain-engine" upgrade "$STAGE/service.json"
 
 - `-live` 只临时启动隔离候选代理，检查国内和境外连接后退出；不安装、不停止现有服务。
 - `upgrade` 复用现有代理配置、种子、DNS 和路由策略，先预检、快照，再停止旧任务并原子安装。迁移会中断当前连接，不能称无感升级。
-- 验收要求任务身份和参数正确、新健康样本通过、状态页由新任务刷新为 OK，以及国内外代理探测通过。任一步失败恢复原文件与原先加载的任务；恢复失败保留备份并明确报错。
+- 验收要求任务身份和参数正确、新健康样本通过、状态任务成功退出并提交本次 OK 发布回执，以及国内外代理探测通过。回执复用原状态文件，记录检查与发布时间、页面路径、大小和 SHA-256；最终另以普通用户身份比对实际 HTML，避免让管理员读取受保护的文档目录。任一步失败恢复原文件与原先加载的任务；恢复失败保留备份并明确报错。
 - 成功后退役旧独立程序、旧 Shell 守护和分散自启动定义，不删除用户日志、历史归档或未获准删除的备份。
 - 后续升级同样准备新程序和三份种子，执行 `sudo "$STAGE/network-domain-engine" upgrade`，默认使用已安装的私有服务配置。升级不允许顺带改接口或状态页身份。
 - 上线后另核对程序哈希、任务参数、用户身份、DNS、套接字出口及日志。没有实际验收就不能把源码更新写成“线上已接管”。
@@ -113,6 +113,8 @@ sudo "$STAGE/network-domain-engine" upgrade "$STAGE/service.json"
 | 主服务和新增 stdout/stderr | 纳入现有 newsyslog，256 KiB 阈值、三份归档 |
 
 不新增日志清理服务。newsyslog 的周期阈值不是即时硬上限，不能承诺磁盘永远不增长；查询日志不能未经判断直接删除。
+
+状态任务直接使用原有用户日志，不建立额外的系统 stdout/stderr 文件。每次发布更新状态回执，但相同检查结果不重复写日志。
 
 ## 实现边界
 
