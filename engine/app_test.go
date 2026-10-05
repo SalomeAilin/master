@@ -73,3 +73,11 @@ func TestWorkerCannotDispatchMaintenance(t *testing.T) {
 		}
 	}
 }
+
+func TestNativeDNSFlagsRequireExplicitLivePreflight(t *testing.T) {
+	for _, args := range [][]string{{"check-service", "-native-dns"}, {"service", "-native-dns"}, {"upgrade", "a", "b"}} {
+		if handled, err := applicationCommand(args); !handled || err == nil {
+			t.Fatal(args, handled, err)
+		}
+	}
+}

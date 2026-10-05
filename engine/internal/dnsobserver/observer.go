@@ -1,6 +1,6 @@
-// Package dnsobserver watches dnsmasq's query log and promptly binds domestic
-// CDN addresses to Ethernet. It never proxies DNS: if it stops, dnsmasq keeps
-// resolving and the route guard remains the fallback.
+// Package dnsobserver watches the DNS query log and binds domestic CDN
+// addresses to Ethernet. DNS resolution does not depend on this worker;
+// the route guard remains the fallback if observation stops.
 package dnsobserver
 
 import (
@@ -18,15 +18,15 @@ const (
 )
 
 var (
-	queryPattern  = regexp.MustCompile(`dnsmasq\[(\d+)\]:\s+(\d+)\s+(\S+)\s+query\[[^\]]+\]\s+(\S+)\s+from`)
-	answerPattern = regexp.MustCompile(`dnsmasq\[(\d+)\]:\s+(\d+)\s+(\S+)\s+(?:reply|cached)\s+(\S+)\s+is\s+(\S+)`)
+	queryPattern  = regexp.MustCompile(`(?:dnsmasq|network-dns)\[(\d+)\]:\s+(\d+)\s+(\S+)\s+query\[[^\]]+\]\s+(\S+)\s+from`)
+	answerPattern = regexp.MustCompile(`(?:dnsmasq|network-dns)\[(\d+)\]:\s+(\d+)\s+(\S+)\s+(?:reply|cached)\s+(\S+)\s+is\s+(\S+)`)
 	ipv4Pattern   = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}$`)
 )
 
 // Normalize lowercases a DNS name and drops its trailing dots.
 func Normalize(name string) string { return strings.ToLower(strings.TrimRight(name, ".")) }
 
-// LoadSuffixes reads the domains dnsmasq forwards to specific servers; every
+// LoadSuffixes reads the domains the DNS policy forwards to specific servers; every
 // such domain, and "cn", counts as domestic.
 func LoadSuffixes(path string) (map[string]bool, error) {
 	data, err := os.ReadFile(path)
@@ -107,7 +107,7 @@ func (c *Correlator) remove(e *list.Element) {
 	delete(c.pending, c.order.Remove(e).(*pendingQuery).key)
 }
 
-// ProcessLine handles one dnsmasq log line.
+// ProcessLine handles one legacy or native DNS log line.
 func (c *Correlator) ProcessLine(line string) {
 	now := c.Now()
 	for front := c.order.Front(); front != nil; front = c.order.Front() {

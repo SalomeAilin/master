@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"network-owned-engine/internal/dnsservice"
 )
 
 type Job struct {
@@ -41,6 +44,11 @@ func Jobs(c Config) []Job {
 		"ProgramArguments": []string{Binary, "run", "--disable-color", "--log-file", "/var/log/network-domain-proxy/service.log", "--log-max-size", "2097152", "--log-max-backups", "3", "-c", c.EngineConfig}}}
 	dns := Job{Label: "homebrew.mxcl.dnsmasq", Definition: map[string]any{"Label": "homebrew.mxcl.dnsmasq", "RunAtLoad": true, "KeepAlive": true,
 		"ProgramArguments": []string{c.Routes.DNSBinary, "--keep-in-foreground", "-C", c.Routes.DNSConfig}}}
+	if c.Version == 2 {
+		policy := dnsservice.Config{Port: 53, Listen: []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr(c.Routes.DNS)}}
+		dns = Job{Label: NativeDNSLabel, Definition: map[string]any{"Label": NativeDNSLabel, "UserName": "nobody", "RunAtLoad": true, "KeepAlive": true, "ThrottleInterval": 5, "ExitTimeOut": 10,
+			"ProgramArguments": []string{Binary, "worker", "dns", "-policy", c.Routes.DNSConfig, "-wired-interface", c.Routes.WiredInterface, "-wifi-interface", c.Routes.WiFiInterface}, "Sockets": policy.SocketDefinition()}}
+	}
 	status := Job{Label: "com.local.network-split-log-guard", Definition: map[string]any{"Label": "com.local.network-split-log-guard", "UserName": c.Status.User, "RunAtLoad": true, "StartInterval": 300, "ExitTimeOut": 15,
 		"EnvironmentVariables": map[string]any{"HOME": c.Status.Home},
 		"ProgramArguments":     []string{Binary, "worker", "status", "-output", c.Status.Output, "-state", c.Status.State, "-log", c.Status.Log}}}

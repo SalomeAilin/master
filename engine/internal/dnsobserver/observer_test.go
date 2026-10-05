@@ -56,6 +56,21 @@ func TestCNAMEChainStaysWithItsQueryNotSharedCDN(t *testing.T) {
 	}
 }
 
+func TestNativeDNSQueryAndCachedAnswersUseTheSameCorrelation(t *testing.T) {
+	c, bound, _ := correlator()
+	for _, text := range []string{
+		"network-dns[7]: 1 127.0.0.1:4000 query[TYPE1] good.cn from 127.0.0.1:4000",
+		"network-dns[7]: 1 127.0.0.1:4000 cached good.cn is 223.5.5.5",
+		"network-dns[7]: 2 127.0.0.1:4000 query[TYPE1] foreign.test from 127.0.0.1:4000",
+		"network-dns[7]: 2 127.0.0.1:4000 reply foreign.test is 223.5.5.5",
+	} {
+		c.ProcessLine(text)
+	}
+	if !reflect.DeepEqual(*bound, []binding{{"good.cn", "223.5.5.5"}}) {
+		t.Fatal(*bound)
+	}
+}
+
 func TestReusedQueryIDIsNotInheritedByForeignQuery(t *testing.T) {
 	c, bound, _ := correlator()
 	line(c, "query[A] good.cn from client")

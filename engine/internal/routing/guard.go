@@ -387,12 +387,24 @@ func (g *Guard) dnsReady() bool {
 
 func (g *Guard) restartDNS() error {
 	info, err := os.Lstat(g.DNSBinary)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o555 {
+	native := g.DNSBinary == runtimecheck.Production.Binary
+	mode := os.FileMode(0o555)
+	if native {
+		mode = 0o755
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != mode {
 		return errors.New("fixed DNS binary missing or unsafe; no automatic import")
 	}
 	stat := info.Sys().(*syscall.Stat_t)
 	if stat.Uid != 0 || stat.Gid != 0 {
 		return errors.New("DNS binary is not root:wheel")
+	}
+	if native {
+		if _, err := g.Run(g.DNSBinary, "check-service", "-c", runtimecheck.ServiceConfigPath); err != nil {
+			return err
+		}
+		_, err := g.Run("/bin/launchctl", "kickstart", "-k", "system/"+runtimecheck.NativeDNSLabel)
+		return err
 	}
 	if _, err := g.Run(g.DNSBinary, "--test", "--conf-file="+g.DNSConfig); err != nil {
 		return err

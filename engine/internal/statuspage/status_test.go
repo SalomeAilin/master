@@ -16,6 +16,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"network-owned-engine/internal/dnsservice"
+	"network-owned-engine/internal/runtimecheck"
 )
 
 func fixture(t *testing.T, scenario string) *Collector {
@@ -132,6 +135,53 @@ func TestUnifiedObserverUsesTheSharedExecutable(t *testing.T) {
 	}
 	if report := c.Collect(context.Background()); report.State != "OK" {
 		t.Fatal(report)
+	}
+}
+
+func TestNativeDNSStatusChecksTheNewPrivilegeAndSocketBoundary(t *testing.T) {
+	c := fixture(t, "normal")
+	c.NativeDNSProgram = "/usr/local/libexec/network-domain-engine"
+	path := filepath.Join(c.Etc, "dnsmasq-network-split.conf")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("bind-interfaces\nserver=1.1.1.1\nserver=/cn/223.5.5.5\nlog-queries=extra\nlog-facility=/var/log/dnsmasq-network-split-query.log\n")...)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := dnsservice.Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := map[string]any{"ProgramArguments": []string{c.NativeDNSProgram, "worker", "dns", "-policy", path, "-wired-interface", "wired-test", "-wifi-interface", "wifi-test"}, "UserName": "nobody", "Sockets": p.SocketDefinition()}
+	base := c.Run
+	c.Run = func(ctx context.Context, args ...string) (string, error) {
+		if args[0] == "/usr/bin/plutil" {
+			b, _ := json.Marshal(definition)
+			return string(b), nil
+		}
+		if args[0] == "/bin/launchctl" && args[2] == "system/"+runtimecheck.NativeDNSLabel {
+			return "state = running\nprogram = " + c.NativeDNSProgram + "\n", nil
+		}
+		return base(ctx, args...)
+	}
+	c.Metadata = func(path string, mode os.FileMode) bool {
+		if path == c.NativeDNSProgram {
+			return mode == 0o755
+		}
+		return true
+	}
+	if report := c.Collect(context.Background()); report.State != "OK" {
+		t.Fatal(report)
+	}
+	for _, field := range []string{"UserName", "Sockets", "ProgramArguments"} {
+		before := definition[field]
+		definition[field] = nil
+		if report := c.Collect(context.Background()); report.State != "BAD" {
+			t.Fatal("invalid native definition accepted", field, report)
+		}
+		definition[field] = before
 	}
 }
 

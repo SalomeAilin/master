@@ -59,6 +59,8 @@ type Record struct {
 // these fields; nil step overrides use the real implementations.
 type Deployer struct {
 	preflightOnly bool
+	nativeDNS     bool
+	preflightDNS  func(serviceConfigPath string) error
 	userFiles     *ownedUserFiles
 	unifiedLayout *unifiedLayout
 	acceptUnified func(serviceConfigPath string, previous int64) error
@@ -378,8 +380,11 @@ func (d *Deployer) health(port int) error {
 		d.Sleep(100 * time.Millisecond)
 	}
 	for _, url := range []string{"https://www.douyin.com/", "https://github.com/"} {
-		if _, err := d.Run("/usr/bin/curl", "--proxy", "http://"+address, "--noproxy", "",
-			"-fsS", "-o", "/dev/null", "--max-time", "15", url); err != nil {
+		args := []string{"/usr/bin/curl", "--proxy", "http://" + address, "--noproxy", "", "-fsS", "-o", "/dev/null", "--max-time", "15"}
+		if url == "https://github.com/" {
+			args = append(args, "--head")
+		}
+		if _, err := d.Run(append(args, url)...); err != nil {
 			return err
 		}
 	}

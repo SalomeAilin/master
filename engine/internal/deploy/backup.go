@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -146,14 +147,39 @@ func (d *Deployer) inspectBackup(parent *os.Root, name string) (Backup, fs.FileI
 			if err != nil {
 				return result, nil, err
 			}
-			targets = d.unifiedTargets(c, true)
-			if len(records) != len(targets) {
-				targets = d.unifiedTargets(c, false)
+			legacy := c
+			legacy.Version = 1
+			legacy.Routes.DNSBinary = service.ProductionRoutes().DNSBinary
+			native := c
+			native.Version = 2
+			native.Routes.DNSBinary = service.Binary
+			migration := append(d.unifiedTargets(legacy, false), d.unifiedTargets(native, false)...)
+			migration = append(migration, d.legacyDNSBinary(legacy))
+			slices.Sort(migration)
+			migration = slices.Compact(migration)
+			targets = nil
+			for _, candidate := range [][]string{d.unifiedTargets(legacy, true), d.unifiedTargets(legacy, false), d.unifiedTargets(native, false), migration} {
+				if len(candidate) != len(records) {
+					continue
+				}
+				matched := true
+				for i := range records {
+					if records[i].Target != candidate[i] {
+						matched = false
+						break
+					}
+				}
+				if matched {
+					targets = candidate
+					break
+				}
 			}
 			for i := range d.managedJobs(c) {
 				optional[fmt.Sprintf("job-%d.plist", i)] = true
 			}
 			optional["parent.plist"], optional["newsyslog.conf"] = true, true
+			optional["service.json"] = true
+			optional["firewall.json"] = true
 		}
 		if decoder.Decode(new(any)) != io.EOF || len(records) != len(targets) {
 			return result, nil, errors.New("unexpected backup manifest")

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"network-owned-engine/internal/dnsservice"
 	"network-owned-engine/internal/runtimecheck"
 	"network-owned-engine/internal/service"
 	"network-owned-engine/internal/statuspage"
@@ -155,7 +156,7 @@ func (d *Deployer) waitUnified(c service.Config, previous int64, started time.Ti
 				break
 			}
 			switch job.Label {
-			case "homebrew.mxcl.dnsmasq", "com.local.network-domain-proxy", "com.local.network-split-dns-event-route-agent":
+			case "homebrew.mxcl.dnsmasq", service.NativeDNSLabel, "com.local.network-domain-proxy", "com.local.network-split-dns-event-route-agent":
 				if info.State != "running" || info.PID <= 0 {
 					ready = false
 				}
@@ -174,6 +175,13 @@ func (d *Deployer) waitUnified(c service.Config, previous int64, started time.Ti
 			}
 			if err := acceptStatusReport(c, started); err != nil {
 				return err
+			}
+			if c.Version == 2 {
+				for _, address := range []string{"127.0.0.1:53", c.Routes.DNS + ":53"} {
+					if err := d.probeNativeDNS(address); err != nil {
+						return err
+					}
+				}
 			}
 			return d.health(ProxyPort)
 		}
@@ -260,6 +268,10 @@ func (d *Deployer) unifiedTargets(c service.Config, legacy bool) []string {
 	return slices.Compact(targets)
 }
 
+func (d *Deployer) legacyDNSBinary(c service.Config) string {
+	return filepath.Join(d.layout(c).Sbin, "dnsmasq-network-split")
+}
+
 // Consolidate keeps the current proxy configuration, rule cache and DNS data.
 // Only program and launchd ownership change. A failed activation restores every
 // saved file and the previously loaded job set before reporting failure.
@@ -273,11 +285,24 @@ func (d *Deployer) Consolidate(configPath string) (backup string, resultErr erro
 			return "", err
 		}
 	}
+	previousConfig := c
+	if d.nativeDNS {
+		c.Version = 2
+		c.Routes.DNSBinary = service.Binary
+	}
 	account, err := user.Lookup(c.Status.User)
 	if err != nil {
 		return "", err
 	}
 	layout := d.layout(c)
+	if d.nativeDNS {
+		if _, err := os.Lstat(layout.MainPlist); err != nil {
+			return "", errors.New("native DNS migration requires the existing unified service")
+		}
+		if !dnsservice.SocketActivationAvailable() {
+			return "", errors.New("native DNS requires CGO_ENABLED=1")
+		}
+	}
 	uid, err := strconv.ParseUint(account.Uid, 10, 32)
 	if err != nil {
 		return "", err
@@ -321,6 +346,16 @@ func (d *Deployer) Consolidate(configPath string) (backup string, resultErr erro
 	if err := d.preflight(existing); err != nil {
 		return "", err
 	}
+	if c.Version == 2 {
+		if d.preflightDNS != nil {
+			err = d.preflightDNS(configPath)
+		} else {
+			err = d.nativePreflight(c)
+		}
+		if err != nil {
+			return "", err
+		}
+	}
 	if d.preflightOnly {
 		if d.unifiedLayout == nil {
 			if err := acceptStatusReport(c, time.Time{}); err != nil {
@@ -340,10 +375,10 @@ func (d *Deployer) Consolidate(configPath string) (backup string, resultErr erro
 	parent := installedJob{Domain: "system", Label: service.Label, Path: layout.MainPlist, Program: d.Binary}
 	if oldUnified {
 		old, err := service.Load(layout.Config, d.unifiedLayout == nil)
-		if err != nil || old != c {
+		if err != nil || old != previousConfig || c.Version < old.Version {
 			return "", errors.New("upgrade must preserve the installed service configuration")
 		}
-		oldJobs = d.unifiedJobs(c)
+		oldJobs = d.unifiedJobs(old)
 		oldJobs = append(oldJobs, parent)
 	}
 	for i, job := range oldJobs {
@@ -355,6 +390,12 @@ func (d *Deployer) Consolidate(configPath string) (backup string, resultErr erro
 	jobs := d.managedJobs(c)
 	legacyFiles := d.retiredPrograms(c)
 	targets := d.unifiedTargets(c, !oldUnified)
+	if previousConfig.Version == 1 && c.Version == 2 {
+		targets = append(targets, d.unifiedTargets(previousConfig, false)...)
+		targets = append(targets, d.legacyDNSBinary(previousConfig))
+		slices.Sort(targets)
+		targets = slices.Compact(targets)
+	}
 	backup, err = os.MkdirTemp(d.BackupParent, "network-unified-backup.")
 	if err != nil {
 		return "", err
@@ -366,6 +407,24 @@ func (d *Deployer) Consolidate(configPath string) (backup string, resultErr erro
 			return backup, errors.Join(err, cleanupErr)
 		}
 		return "", err
+	}
+	var firewall map[string]string
+	if c.Version == 2 {
+		paths := []string{d.Binary}
+		if previousConfig.Version == 1 {
+			paths = append(paths, d.legacyDNSBinary(previousConfig))
+		}
+		firewall, err = d.firewallStates(paths)
+		if err != nil {
+			return backup, err
+		}
+		data, err := json.Marshal(firewall)
+		if err != nil {
+			return backup, err
+		}
+		if err := os.WriteFile(filepath.Join(backup, "firewall.json"), data, 0o600); err != nil {
+			return backup, err
+		}
 	}
 	changed, stopped := false, false
 	var previousProbe int64
@@ -390,7 +449,20 @@ func (d *Deployer) Consolidate(configPath string) (backup string, resultErr erro
 		if err := d.InstallFile(filepath.Join(d.Root, EngineName), d.Binary, 0o755); err != nil {
 			return err
 		}
-		if err := d.InstallFile(configPath, layout.Config, 0o600); err != nil {
+		if c.Version == 2 {
+			if err := d.setFirewall(d.Binary, "allowed"); err != nil {
+				return err
+			}
+		}
+		encoded, err := json.MarshalIndent(c, "", "  ")
+		if err != nil {
+			return err
+		}
+		candidateConfig := filepath.Join(backup, "service.json")
+		if err := os.WriteFile(candidateConfig, encoded, 0o600); err != nil {
+			return err
+		}
+		if err := d.InstallFile(candidateConfig, layout.Config, 0o600); err != nil {
 			return err
 		}
 		for i, job := range jobs {
@@ -428,6 +500,11 @@ func (d *Deployer) Consolidate(configPath string) (backup string, resultErr erro
 				if err := remove(job.Path); err != nil && !os.IsNotExist(err) {
 					return err
 				}
+			}
+		}
+		if previousConfig.Version == 1 && c.Version == 2 {
+			if err := os.Remove(filepath.Join(layout.Jobs, "homebrew.mxcl.dnsmasq.plist")); err != nil && !os.IsNotExist(err) {
+				return err
 			}
 		}
 		if err := d.extendUnifiedLogs(backup, layout.Newsyslog); err != nil {
@@ -472,6 +549,26 @@ func (d *Deployer) Consolidate(configPath string) (backup string, resultErr erro
 				}
 			}
 		}
+		if previousConfig.Version == 1 && c.Version == 2 {
+			path := d.legacyDNSBinary(previousConfig)
+			var saved string
+			for _, record := range records {
+				if record.Target == path && record.Present {
+					saved = filepath.Join(backup, record.Copy)
+				}
+			}
+			before, beforeErr := fileDigest(saved)
+			after, afterErr := fileDigest(path)
+			if beforeErr != nil || afterErr != nil || before != after {
+				return errors.New("retired DNS binary changed during migration")
+			}
+			if err := d.setFirewall(path, "absent"); err != nil {
+				return err
+			}
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+		}
 		return d.checkInterrupted()
 	}()
 	if err == nil {
@@ -494,8 +591,10 @@ func (d *Deployer) Consolidate(configPath string) (backup string, resultErr erro
 		if restoreErr := d.restore(backup, records); restoreErr != nil {
 			return backup, fmt.Errorf("%w; file rollback failed: %v", err, restoreErr)
 		}
+		for path, state := range firewall {
+			rollback = append(rollback, d.setFirewall(path, state))
+		}
 	}
-	rollback = nil
 	for _, job := range oldJobs {
 		if job.Loaded {
 			current, checkErr := d.inspectInstalledJob(job)
@@ -509,7 +608,7 @@ func (d *Deployer) Consolidate(configPath string) (backup string, resultErr erro
 		}
 	}
 	if rollbackErr := errors.Join(rollback...); rollbackErr != nil {
-		return backup, fmt.Errorf("%w; old job restoration failed: %v", err, rollbackErr)
+		return backup, fmt.Errorf("%w; runtime rollback incomplete: %v", err, rollbackErr)
 	}
 	return backup, err
 }
@@ -541,7 +640,7 @@ func (d *Deployer) extendUnifiedLogs(backup, path string) error {
 	return d.InstallFile(source, path, 0o644)
 }
 
-func Consolidate(ctx context.Context, root, config string, out *os.File, preflightOnly bool) (string, error) {
+func Consolidate(ctx context.Context, root, config string, out *os.File, preflightOnly, nativeDNS bool) (string, error) {
 	if os.Geteuid() != 0 {
 		return "", errors.New("consolidation requires administrator authorization")
 	}
@@ -555,6 +654,7 @@ func Consolidate(ctx context.Context, root, config string, out *os.File, preflig
 		return runtimecheck.RunContext(context.Background(), limit, args...)
 	}
 	d.preflightOnly = preflightOnly
+	d.nativeDNS = nativeDNS
 	d.Context = ctx
 	d.Interrupted = func() bool { return ctx.Err() != nil }
 	release, err := d.Lock()

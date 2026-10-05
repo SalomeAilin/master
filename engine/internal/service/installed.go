@@ -3,12 +3,14 @@ package service
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
 
+	"network-owned-engine/internal/dnsservice"
 	"network-owned-engine/internal/routing"
 	"network-owned-engine/internal/runtimecheck"
 )
@@ -37,8 +39,25 @@ func CheckInstallation(c Config) error {
 			return err
 		}
 	}
-	if err := trustedFile(c.Routes.DNSBinary, 0o555, 0); err != nil {
+	mode := os.FileMode(0o555)
+	if c.Version == 2 {
+		mode = 0o755
+	}
+	if err := trustedFile(c.Routes.DNSBinary, mode, 0); err != nil {
 		return err
+	}
+	if c.Version == 2 {
+		if !dnsservice.SocketActivationAvailable() {
+			return errors.New("native DNS requires a CGO-enabled macOS build")
+		}
+		policy, err := dnsservice.Load(c.Routes.DNSConfig)
+		if err != nil {
+			return err
+		}
+		want := []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr(c.Routes.DNS)}
+		if policy.Port != 53 || !slices.Equal(policy.Listen, want) {
+			return errors.New("native DNS listeners differ from the installed service")
+		}
 	}
 	lines, err := routing.ReadLines(c.Routes.DNSConfig)
 	if err != nil {

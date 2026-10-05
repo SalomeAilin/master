@@ -1,5 +1,5 @@
 // Package service owns the single application entry and its launchd-managed
-// worker processes. DNS remains the existing, separately licensed dependency.
+// worker processes, including the native DNS backend in version 2.
 package service
 
 import (
@@ -24,6 +24,7 @@ const JobsDirectory = runtimecheck.JobsDirectory
 const PlistPath = "/Library/LaunchDaemons/" + Label + ".plist"
 const LockPath = "/var/db/network-split-service.flock"
 const ParentExitTimeout = 240
+const NativeDNSLabel = runtimecheck.NativeDNSLabel
 
 type StatusConfig struct {
 	User   string `json:"user"`
@@ -47,13 +48,16 @@ func ProductionRoutes() routing.Config {
 }
 
 func (c Config) Validate() error {
-	if c.Version != 1 || c.EngineConfig != "/usr/local/etc/network-domain-proxy.json" {
+	if (c.Version != 1 && c.Version != 2) || c.EngineConfig != "/usr/local/etc/network-domain-proxy.json" {
 		return errors.New("unexpected unified configuration")
 	}
 	if err := c.Routes.Validate(); err != nil {
 		return err
 	}
 	fixed := ProductionRoutes()
+	if c.Version == 2 {
+		fixed.DNSBinary = Binary
+	}
 	for _, pair := range [][2]string{{c.Routes.ChinaList, fixed.ChinaList}, {c.Routes.ExtraList, fixed.ExtraList}, {c.Routes.DomainList, fixed.DomainList}, {c.Routes.DNSConfig, fixed.DNSConfig}, {c.Routes.DNSBinary, fixed.DNSBinary},
 		{c.Routes.GuardLock, fixed.GuardLock}, {c.Routes.ChinaLock, fixed.ChinaLock}, {c.Routes.ForceRebuild, fixed.ForceRebuild}, {c.Routes.GuardLog, fixed.GuardLog}, {c.Routes.ChinaLog, fixed.ChinaLog}} {
 		if pair[0] != pair[1] {
@@ -106,6 +110,9 @@ func Load(path string, installed bool) (Config, error) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&c); err != nil {
 		return c, err
+	}
+	if c.Version == 2 {
+		c.Routes.DNSBinary = Binary
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {

@@ -32,6 +32,14 @@ jobs:
       - name: Go formatting
         working-directory: engine
         run: test -z "$(gofmt -l .)"
+      - name: Download and verify pinned modules
+        working-directory: engine
+        env:
+          GOPROXY: https://proxy.golang.org
+          GOSUMDB: sum.golang.org
+        run: |
+          go mod download
+          go mod verify
       - name: Go race tests
         working-directory: engine
         run: go test -race -timeout 5m ./...

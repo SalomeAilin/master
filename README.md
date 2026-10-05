@@ -33,7 +33,7 @@
 
 多进程不是多个需要人工安装的产品。它保留了权限和故障隔离；dnsmasq 仍是外部依赖，不能称整套系统全部自研或只有一个进程。
 
-DNS 内置化正在开发，尚未替换线上 dnsmasq。目前只完成策略解析、网卡绑定复用和低权限套接字交接基础；协议处理与兼容性验收仍待完成。套接字激活使用 macOS 系统接口，相关测试需以 `CGO_ENABLED=1` 构建，不运行生产 53 端口或改变现有 DNS。
+候选版 `0.3.0-native-dns` 已把 DNS 编入同一主程序，尚未替换线上 dnsmasq。报文处理使用固定版本 `miekg/dns v1.1.73`；出口选择、缓存、安全策略和部署仍由本项目实现。DNS 工作进程以 nobody 运行，53 端口由 launchd 创建并交接，不让解析报文的进程以 root 常驻。需要 `CGO_ENABLED=1` 调用 macOS 套接字激活接口。
 
 <details>
 <summary>维护：验证、迁移和更新</summary>
@@ -42,6 +42,8 @@ DNS 内置化正在开发，尚未替换线上 dnsmasq。目前只完成策略�
 
 在 `engine/` 运行：
 ```sh
+GOTOOLCHAIN=go1.26.8 go mod download
+GOTOOLCHAIN=go1.26.8 go mod verify
 GOTOOLCHAIN=go1.26.8 go test -race -timeout 5m ./...
 GOTOOLCHAIN=go1.26.8 go vet ./...
 GOTOOLCHAIN=go1.26.8 go test -tags integration -run Integration -timeout 5m .
@@ -55,7 +57,7 @@ GOTOOLCHAIN=go1.26.8 go test -tags integration -run Integration -timeout 5m .
 
 在 `engine/` 构建一次即可，`STAGE` 使用本任务独有的系统临时目录：
 ```sh
-CGO_ENABLED=0 GOTOOLCHAIN=go1.26.8 go build -trimpath -buildvcs=false \
+CGO_ENABLED=1 GOTOOLCHAIN=go1.26.8 go build -trimpath -buildvcs=false \
   -o "$STAGE/network-domain-engine" .
 ```
 
@@ -81,6 +83,14 @@ sudo "$STAGE/network-domain-engine" upgrade "$STAGE/service.json"
 - 成功后退役旧独立程序、旧 Shell 守护和分散自启动定义，不删除用户日志、历史归档或未获准删除的备份。
 - 后续升级同样准备新程序和三份种子，执行 `sudo "$STAGE/network-domain-engine" upgrade`，默认使用已安装的私有服务配置。升级不允许顺带改接口或状态页身份。
 - 上线后另核对程序哈希、任务参数、用户身份、DNS、套接字出口及日志。没有实际验收就不能把源码更新写成“线上已接管”。
+
+已经统一运行的系统迁移到内置 DNS，使用同一个入口：
+```sh
+sudo "$STAGE/network-domain-engine" check-service -live -native-dns
+sudo "$STAGE/network-domain-engine" upgrade -native-dns
+```
+
+第一条只在临时端口试运行 nobody DNS 工作进程，验证 UDP/TCP、国内外回答、AAAA 过滤和无效域名后退出；线上 DNS 和防火墙不变。第二条须另行确认：除替换程序外，还把 DNS 的显式防火墙放行从旧程序迁到主程序，不关闭防火墙、不扩大 DNS 监听地址。升级保留 DNS 策略及日志的原文件名，这些兼容数据路径中的 `dnsmasq` 不代表仍调用旧程序。验收成功才删除旧 DNS 二进制；失败恢复程序、任务、配置及原防火墙状态，恢复材料保留在同一验收备份中。
 
 ## 维护命令
 
@@ -108,7 +118,7 @@ sudo "$STAGE/network-domain-engine" upgrade "$STAGE/service.json"
 
 | 日志 | 轮转或压缩 |
 | --- | --- |
-| dnsmasq 查询日志 | 观察进程消费后在 64 MiB 处压缩；停读或落后可能超过阈值 |
+| DNS 查询日志 | 观察进程消费后在 64 MiB 处压缩；候选内置 DNS 还会在达到阈值时暂停写入，最多超出一批 8 KiB；旧 dnsmasq 没有此写入上限 |
 | 路由、观察、健康日志 | 沿用 newsyslog；路由十份归档，观察和健康五份，每份阈值 1 MiB |
 | 代理 service.log | 新写文件 2 MiB，三份归档 |
 | 用户状态日志 | 每份 1 MiB，三份归档，已有超大文件不静默截断 |
@@ -127,12 +137,14 @@ sudo "$STAGE/network-domain-engine" upgrade "$STAGE/service.json"
 - 不使用代理的程序仍依赖周期性 IP 路由守护，存在检测空档，不能承诺即时阻断。Wi-Fi 不可用时先添加境外拒绝路由，再允许国内有线默认路由；恢复后先确认 Wi-Fi 默认路由，才解除阻断。
 - DNS 观察按进程、查询 ID 和客户端关联 CNAME；不把共享 CDN 永久当成国内。所有 DNS 派生路由必须再次通过地址策略，健康检查不因 HTTP 错误或单次延迟重启服务。
 - dnsmasq 固定程序须符合 `root:wheel:555`；异常时报警，不从 Homebrew 自动复制执行。统一主程序启动与故障恢复均保留此检查。
+- 内置 DNS 使用与现有 DNS 相同的上游、域名后缀、监听地址及 TTL 设置。上游查询绑定选定网卡，UDP 截断后只在同接口改用 TCP；不会借另一线路重试。缓存最多 10000 项并设估算内存上限 32 MiB；失败不缓存，带客户端选项的查询不共享缓存。保留 hosts、私网反查、AAAA 过滤、环路检测和本地网段访问限制，拒绝上游返回的私网 A 地址及服务地址提示。它是有限的 DNS 转发器，不提供 DHCP、TFTP、DNSSEC 验证或 DoH；遇到未支持的旧配置项会拒绝迁移。
+- 内置 DNS 模式要求主程序 `root:wheel:755`、工作进程 nobody 和严格匹配的 launchd 套接字定义。状态页按实际后端核对权限，不以删掉旧检查来掩盖不一致。
 
 ## 目录
 
 `engine/` 是唯一 Go 模块，包内测试与源码同目录；`config/` 保存策略、DNS、Chrome 与可选 SSH 配置。`scripts/` 只剩可选 SSH 工具，`tests/` 保留对应检查。公开历史在 `archive/`，私人内容在被忽略的 `local/`，不另存旧源码副本。
 
-旧程序和操作可从 [Git 历史](https://github.com/SalomeAilin/master/tree/93da85ee314542351ebf06bda139a5375fc0645f)恢复。Go 模块只依赖标准库；Go、macOS、dnsmasq 和[外部分流数据](https://github.com/MetaCubeX/meta-rules-dat)保留各自权利及许可证，旧核心的[许可证原文](archive/sing-box-LICENSE)保留不变。
+旧程序和操作可从 [Git 历史](https://github.com/SalomeAilin/master/tree/93da85ee314542351ebf06bda139a5375fc0645f)恢复。Go 模块现在包含第三方 DNS 协议库，不再声称只依赖标准库。依赖固定在 `go.mod`/`go.sum`，[第三方许可](docs/THIRD-PARTY-NOTICES)随源码保留，分发二进制时也须附带。Go、macOS、dnsmasq 和[外部分流数据](https://github.com/MetaCubeX/meta-rules-dat)保留各自权利及许可证，旧核心的[许可证原文](archive/sing-box-LICENSE)保留不变。
 
 </details>
 

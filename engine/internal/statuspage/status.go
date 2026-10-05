@@ -16,12 +16,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
 	"time"
 
+	"network-owned-engine/internal/dnsservice"
 	"network-owned-engine/internal/policy"
+	"network-owned-engine/internal/runtimecheck"
 )
 
 type Row struct{ Name, Address, State, Detail string }
@@ -61,6 +64,7 @@ func ParseRoute(raw string) Route {
 type Collector struct {
 	Etc, Sbin, Launchd string
 	ObserverProgram    string
+	NativeDNSProgram   string
 	Run                func(context.Context, ...string) (string, error)
 	Lookup             func(context.Context, string) ([]netip.Addr, error)
 	HTTP               func(context.Context, string, string) (string, bool)
@@ -234,7 +238,11 @@ func (c *Collector) Collect(ctx context.Context) Report {
 	add("foreign-route", foreign.String(), foreign.Matches(wifi) || fallback)
 	domestic := route("223.5.5.5")
 	add("domestic-route", domestic.String(), wired.Interface == cfg.Domestic.Interface && domestic.Matches(wired))
-	for label, program := range map[string]string{"homebrew.mxcl.dnsmasq": "dnsmasq-network-split", "com.local.network-split-dns-event-route-agent": "network-split-dns-event-route-agent"} {
+	dnsLabel := "homebrew.mxcl.dnsmasq"
+	if c.NativeDNSProgram != "" {
+		dnsLabel = runtimecheck.NativeDNSLabel
+	}
+	for label, program := range map[string]string{dnsLabel: "dnsmasq-network-split", "com.local.network-split-dns-event-route-agent": "network-split-dns-event-route-agent"} {
 		out, err := c.Run(ctx, "/bin/launchctl", "print", "system/"+label)
 		values := map[string]string{}
 		for _, line := range strings.Split(out, "\n") {
@@ -248,6 +256,9 @@ func (c *Collector) Collect(ctx context.Context) Report {
 		expected := filepath.Join(c.Sbin, program)
 		if label == "com.local.network-split-dns-event-route-agent" && c.ObserverProgram != "" {
 			expected = c.ObserverProgram
+		}
+		if label == dnsLabel && c.NativeDNSProgram != "" {
+			expected = c.NativeDNSProgram
 		}
 		add(label, values["state"], err == nil && values["state"] == "running" && values["program"] == expected)
 	}
@@ -268,20 +279,34 @@ func (c *Collector) Collect(ctx context.Context) Report {
 		}
 	}
 	add("system-resolvers", dns, dnsOK && foundDNS)
-	plistPath := filepath.Join(c.Launchd, "homebrew.mxcl.dnsmasq.plist")
+	plistPath := filepath.Join(c.Launchd, dnsLabel+".plist")
 	binaryPath := filepath.Join(c.Sbin, "dnsmasq-network-split")
+	binaryMode := os.FileMode(0o555)
+	if c.NativeDNSProgram != "" {
+		binaryPath = c.NativeDNSProgram
+		binaryMode = 0o755
+	}
 	metadata := c.Metadata
 	if metadata == nil {
 		metadata = privateMetadata
 	}
-	metadataOK := metadata(binaryPath, 0o555) && metadata(configPath, 0o644) && metadata(plistPath, 0o644)
+	metadataOK := metadata(binaryPath, binaryMode) && metadata(configPath, 0o644) && metadata(plistPath, 0o644)
 	optionsOK := true
 	for _, option := range []string{"no-resolv", "filter-AAAA", "domain-needed", "bogus-priv", "stop-dns-rebind", "dns-loop-detect", "local-service"} {
 		optionsOK = optionsOK && options[option]
 	}
 	out, err = c.Run(ctx, "/usr/bin/plutil", "-convert", "json", "-o", "-", plistPath)
-	var daemon struct{ ProgramArguments []string }
+	var daemon struct {
+		ProgramArguments []string
+		UserName         string
+		Sockets          map[string]any
+	}
 	argumentsOK := err == nil && json.Unmarshal([]byte(out), &daemon) == nil && dnsArgumentsOK(daemon.ProgramArguments, binaryPath, configPath)
+	if c.NativeDNSProgram != "" {
+		p, e := dnsservice.Parse(dnsData)
+		want := []string{binaryPath, "worker", "dns", "-policy", configPath, "-wired-interface", cfg.Domestic.Interface, "-wifi-interface", cfg.Foreign.Interface}
+		argumentsOK = err == nil && json.Unmarshal([]byte(out), &daemon) == nil && e == nil && daemon.UserName == "nobody" && slices.Equal(daemon.ProgramArguments, want) && reflect.DeepEqual(daemon.Sockets, p.SocketDefinition())
+	}
 	add("dns-security-baseline", fmt.Sprintf("metadata=%t options=%t launch_arguments=%t", metadataOK, optionsOK, argumentsOK), metadataOK && optionsOK && argumentsOK)
 	var nonce [8]byte
 	_, randomErr := rand.Read(nonce[:])

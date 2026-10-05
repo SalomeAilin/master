@@ -35,6 +35,10 @@ func Inspect(d Paths, run func(...string) (string, error)) (State, error) {
 	if unified {
 		services["system/com.local.network-split-dns-event-route-agent"] = d.Binary
 		services["system/"+ServiceLabel] = d.Binary
+		if d.NativeDNS {
+			delete(services, "system/homebrew.mxcl.dnsmasq")
+			services["system/"+NativeDNSLabel] = d.Binary
+		}
 	}
 	for label, program := range services {
 		details, err := run("/bin/launchctl", "print", label)
@@ -62,8 +66,14 @@ func Inspect(d Paths, run func(...string) (string, error)) (State, error) {
 	names := []string{"network-split-policy", "network-split-dns-event-route-agent", "dnsmasq-network-split", "china-route.sh", "network-split-guard.sh"}
 	if unified {
 		names = []string{"dnsmasq-network-split"}
+		if d.NativeDNS {
+			names = nil
+		}
 		files = append(files, d.ServiceConfig, d.SupervisorPlist)
 		for _, name := range []string{"homebrew.mxcl.dnsmasq", "com.local.china-route", "com.local.network-split-guard", "com.local.network-split-log-guard"} {
+			if name == "homebrew.mxcl.dnsmasq" && d.NativeDNS {
+				name = NativeDNSLabel
+			}
 			files = append(files, filepath.Join(filepath.Dir(d.Plist), name+".plist"))
 		}
 	}

@@ -4,6 +4,7 @@ package runtimecheck
 
 // Paths are the installed locations the deployment manages.
 type Paths struct {
+	NativeDNS                                                                    bool
 	ServiceConfig, SupervisorPlist                                               string
 	HealthLog                                                                    string
 	State, Plist, Config, Binary, Tool, Rules, Cache, LogDir, Lock, BackupParent string
@@ -33,6 +34,7 @@ const (
 	ServiceLabel       = "com.local.network-split-service"
 	ServiceConfigPath  = "/usr/local/etc/network-split-service.json"
 	JobsDirectory      = "/usr/local/etc/network-split-jobs"
+	NativeDNSLabel     = "com.local.network-split-dns"
 )
 
 // Unified uses one executable; worker plists are registered by the parent job,

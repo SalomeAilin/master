@@ -141,6 +141,9 @@ func TestHealthWaitsForListenerBeforeHTTPSProbes(t *testing.T) {
 		!slices.Equal(sleeps, []time.Duration{100 * time.Millisecond}) || len(run.calls) != 2 {
 		t.Fatal(dials, sleeps, run.calls)
 	}
+	if !slices.Contains(run.calls[1], "--head") || slices.Contains(run.calls[0], "--head") {
+		t.Fatal("foreign probe must avoid full-page download; domestic HEAD may be unsupported", run.calls)
+	}
 }
 
 func TestListenerReadinessTimeoutSkipsHTTPSProbes(t *testing.T) {

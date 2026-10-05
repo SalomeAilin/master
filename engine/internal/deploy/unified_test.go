@@ -8,21 +8,24 @@ import (
 	"os/user"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"network-owned-engine/internal/dnsservice"
 	"network-owned-engine/internal/healthcheck"
 	"network-owned-engine/internal/service"
 	"network-owned-engine/internal/statuspage"
 )
 
 type unifiedFixture struct {
-	config service.Config
-	path   string
-	loaded map[string]installedJob
-	fault  string
-	failed bool
+	config   service.Config
+	path     string
+	loaded   map[string]installedJob
+	fault    string
+	failed   bool
+	firewall map[string]string
 }
 
 func unifiedSetup(t *testing.T) (*Deployer, *unifiedFixture) {
@@ -42,7 +45,7 @@ func unifiedSetup(t *testing.T) (*Deployer, *unifiedFixture) {
 	c := service.Config{Version: 1, EngineConfig: "/usr/local/etc/network-domain-proxy.json", Routes: service.ProductionRoutes(), Status: service.StatusConfig{User: u.Username, Home: u.HomeDir, Output: filepath.Join(u.HomeDir, "status-test.html"), State: filepath.Join(u.HomeDir, "status-test.state"), Log: filepath.Join(u.HomeDir, "status-test.log")}}
 	c.Routes.DNS, c.Routes.WiredIP, c.Routes.WiredGateway, c.Routes.WiFiGateway = "192.0.2.10", "192.0.2.10", "192.0.2.1", "198.51.100.1"
 	c.Routes.WiredInterface, c.Routes.WiFiInterface, c.Routes.WiredService, c.Routes.WiFiService = "en0", "en1", "Ethernet", "Wi-Fi"
-	f := &unifiedFixture{config: c, path: filepath.Join(d.Root, "service.json"), loaded: map[string]installedJob{}}
+	f := &unifiedFixture{config: c, path: filepath.Join(d.Root, "service.json"), loaded: map[string]installedJob{}, firewall: map[string]string{}}
 	d.unifiedLayout = &unifiedLayout{MainPlist: filepath.Join(base, "launchd", "parent.plist"), Config: filepath.Join(base, "etc", "unified.json"), Jobs: filepath.Join(base, "jobs"), LegacyJobs: filepath.Join(base, "launchd"),
 		UserPlist: filepath.Join(base, "user-agent.plist"), Newsyslog: filepath.Join(base, "newsyslog.conf"), Sbin: filepath.Join(base, "sbin"), OldStatus: filepath.Join(base, "old-status"), UserHome: base}
 	encoded, _ := json.Marshal(c)
@@ -73,6 +76,42 @@ func unifiedSetup(t *testing.T) (*Deployer, *unifiedFixture) {
 	d.Sleep = func(time.Duration) {}
 	d.ProcessAlive = func(int) (bool, error) { return false, nil }
 	d.Run = func(args ...string) (string, error) {
+		if args[0] == firewallTool {
+			switch args[1] {
+			case "--listapps":
+				var paths []string
+				for path := range f.firewall {
+					paths = append(paths, path)
+				}
+				slices.Sort(paths)
+				out := fmt.Sprintf("Total number of apps = %d\n", len(paths))
+				for i, path := range paths {
+					state := "Allow"
+					if f.firewall[path] == "blocked" {
+						state = "Block"
+					}
+					out += fmt.Sprintf("%d : %s\n (%s incoming connections)\n", i+1, path, state)
+				}
+				return out, nil
+			case "--add":
+				if _, exists := f.firewall[args[2]]; !exists {
+					f.firewall[args[2]] = "blocked"
+				}
+			case "--remove":
+				delete(f.firewall, args[2])
+			case "--blockapp":
+				f.firewall[args[2]] = "blocked"
+			case "--unblockapp":
+				if f.fault == "firewall" && args[2] == d.Binary && !f.failed {
+					f.failed = true
+					return "", errors.New("firewall change failed")
+				}
+				f.firewall[args[2]] = "allowed"
+			default:
+				t.Fatal("unexpected firewall operation", args)
+			}
+			return "", nil
+		}
 		if args[0] != "/bin/launchctl" {
 			t.Fatal("unexpected command", args)
 		}
@@ -93,6 +132,7 @@ func unifiedSetup(t *testing.T) (*Deployer, *unifiedFixture) {
 				for _, job := range d.unifiedJobs(c) {
 					delete(f.loaded, job.Domain+"/"+job.Label)
 				}
+				delete(f.loaded, "system/"+service.NativeDNSLabel)
 			}
 			return "", nil
 		case "bootstrap":
@@ -101,12 +141,16 @@ func unifiedSetup(t *testing.T) (*Deployer, *unifiedFixture) {
 					return "", errors.New("could not bootstrap")
 				}
 				f.loaded["system/"+service.Label] = installedJob{Domain: "system", Label: service.Label, Path: args[3], Program: d.Binary, Loaded: true}
-				for _, job := range d.unifiedJobs(c) {
+				current, err := service.Load(d.unifiedLayout.Config, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, job := range d.unifiedJobs(current) {
 					f.loaded[job.Domain+"/"+job.Label] = job
 				}
 				return "", nil
 			}
-			for _, job := range d.legacyJobs(c, u.Uid) {
+			for _, job := range append(d.legacyJobs(c, u.Uid), d.unifiedJobs(c)...) {
 				if args[3] == job.Path {
 					f.loaded[job.Domain+"/"+job.Label] = job
 					return "", nil
@@ -117,6 +161,86 @@ func unifiedSetup(t *testing.T) (*Deployer, *unifiedFixture) {
 		return "", nil
 	}
 	return d, f
+}
+
+func TestNativeDNSMigrationAndRollbackPreserveThePreviousRuntime(t *testing.T) {
+	if !dnsservice.SocketActivationAvailable() {
+		t.Skip("requires macOS cgo")
+	}
+	for _, fault := range []string{"", "preflight-dns", "firewall", "accept", "retired-file-changed"} {
+		t.Run(fault, func(t *testing.T) {
+			d, f := unifiedSetup(t)
+			if _, err := d.Consolidate(f.path); err != nil {
+				t.Fatal(err)
+			}
+			oldDNS := d.legacyDNSBinary(f.config)
+			writeTestFile(t, oldDNS, "old DNS executable")
+			f.firewall[oldDNS] = "allowed"
+			f.firewall["/unrelated/app"] = "blocked"
+			before := fileSet(t, filepath.Dir(d.BackupParent))
+			d.nativeDNS = true
+			d.preflightDNS = func(string) error {
+				if fault == "preflight-dns" {
+					return errors.New("DNS preflight failed")
+				}
+				return nil
+			}
+			f.fault = fault
+			if fault == "retired-file-changed" {
+				d.acceptUnified = func(string, int64) error { writeTestFile(t, oldDNS, "changed"); return nil }
+			}
+			backup, err := d.Consolidate(f.path)
+			if fault == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, exists := f.loaded["system/homebrew.mxcl.dnsmasq"]; exists {
+					t.Fatal("legacy DNS still loaded")
+				}
+				if _, exists := f.loaded["system/"+service.NativeDNSLabel]; !exists {
+					t.Fatal("native DNS missing")
+				}
+				if _, err := os.Stat(oldDNS); !os.IsNotExist(err) {
+					t.Fatal("legacy DNS not retired", err)
+				}
+				if f.firewall[d.Binary] != "allowed" || f.firewall[oldDNS] != "" {
+					t.Fatal(f.firewall)
+				}
+				if inventory, err := d.InspectBackup(backup); err != nil || inventory.Kind != "unified" {
+					t.Fatal(inventory, err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("migration failure ignored")
+				}
+				if !reflect.DeepEqual(before, fileSet(t, filepath.Dir(d.BackupParent))) {
+					t.Fatal("previous files not restored")
+				}
+				if f.firewall[oldDNS] != "allowed" || f.firewall[d.Binary] != "" {
+					t.Fatal("firewall was not restored", f.firewall)
+				}
+				if _, exists := f.loaded["system/"+service.NativeDNSLabel]; exists {
+					t.Fatal("new DNS left running")
+				}
+				if _, exists := f.loaded["system/homebrew.mxcl.dnsmasq"]; !exists {
+					t.Fatal("previous DNS not restored")
+				}
+			}
+			if f.firewall["/unrelated/app"] != "blocked" {
+				t.Fatal("unrelated firewall entry changed")
+			}
+		})
+	}
+}
+
+func TestFirewallInventoryRejectsUncertainState(t *testing.T) {
+	d, _ := unifiedSetup(t)
+	for _, output := range []string{"", "Total number of apps = 1\n", "Total number of apps = 1\n1 : /test\nunknown\n", "Total number of apps = 0\n1 : /test\n(Allow incoming connections)\n"} {
+		d.Run = func(...string) (string, error) { return output, nil }
+		if _, err := d.firewallStates([]string{"/test"}); err == nil {
+			t.Fatal("uncertain firewall state accepted", output)
+		}
+	}
 }
 
 func fileSet(t *testing.T, dir string) map[string]string {

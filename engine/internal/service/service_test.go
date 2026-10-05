@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"network-owned-engine/internal/dnsservice"
 	"network-owned-engine/internal/runtimecheck"
 )
 
@@ -122,7 +123,7 @@ func TestConfigurationRejectsUnsafePathsAndRootStatus(t *testing.T) {
 			c := testConfig(t)
 			switch variant {
 			case "version":
-				c.Version = 2
+				c.Version = 3
 			case "same-interface":
 				c.Routes.WiFiInterface = c.Routes.WiredInterface
 			case "root-status":
@@ -139,6 +140,46 @@ func TestConfigurationRejectsUnsafePathsAndRootStatus(t *testing.T) {
 				t.Fatal("unsafe configuration accepted", variant)
 			}
 		})
+	}
+}
+
+func TestNativeDNSConfigurationUsesNobodyAndActivatedSockets(t *testing.T) {
+	c := testConfig(t)
+	c.Version = 2
+	c.Routes.DNSBinary = Binary
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "native.json")
+	data, _ := json.Marshal(c)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path, false)
+	if err != nil || got != c {
+		t.Fatal(got, err)
+	}
+	found := false
+	for _, job := range Jobs(c) {
+		if job.Program() != Binary {
+			t.Fatal("external executable", job)
+		}
+		if job.Label == NativeDNSLabel {
+			found = true
+			if job.Definition["UserName"] != "nobody" || job.Arguments()[1] != "worker" || job.Arguments()[2] != "dns" {
+				t.Fatal(job)
+			}
+			data, err := Plist(job.Definition)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), "<key>"+dnsservice.UDPActivation+"</key>") || !strings.Contains(string(data), "<key>"+dnsservice.TCPActivation+"</key>") || !strings.Contains(string(data), "<string>53</string>") {
+				t.Fatal(string(data))
+			}
+		}
+	}
+	if !found {
+		t.Fatal("native DNS worker missing")
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/miekg/dns"
 	"network-owned-engine/internal/policy"
 )
 
@@ -142,6 +143,18 @@ func Parse(data []byte) (Config, error) {
 			return c, errors.New("too many DNS servers for one domain")
 		}
 	}
+	unique := map[netip.Addr]bool{}
+	for _, ip := range c.Servers {
+		unique[ip] = true
+	}
+	for _, servers := range c.Domains {
+		for _, ip := range servers {
+			unique[ip] = true
+		}
+	}
+	if len(unique) > 32 {
+		return c, errors.New("too many distinct DNS upstreams")
+	}
 	for _, ip := range c.Listen {
 		if slices.Contains(c.Servers, ip) {
 			return c, errors.New("DNS policy loops to its listener")
@@ -193,15 +206,10 @@ func validDomain(name string) bool {
 
 func (c Config) Select(name string) (servers []netip.Addr, domestic bool) {
 	name = strings.ToLower(strings.TrimSuffix(name, "."))
-	for {
-		if values, ok := c.Domains[name]; ok {
+	for _, offset := range dns.Split(dns.Fqdn(name)) {
+		if values, ok := c.Domains[name[offset:]]; ok {
 			return append([]netip.Addr(nil), values...), true
 		}
-		_, rest, ok := strings.Cut(name, ".")
-		if !ok {
-			break
-		}
-		name = rest
 	}
 	return append([]netip.Addr(nil), c.Servers...), false
 }

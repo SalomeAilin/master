@@ -15,6 +15,7 @@ import (
 
 	"network-owned-engine/internal/deploy"
 	"network-owned-engine/internal/dnsobserver"
+	"network-owned-engine/internal/dnsservice"
 	"network-owned-engine/internal/evidence"
 	"network-owned-engine/internal/healthcheck"
 	"network-owned-engine/internal/policy"
@@ -41,12 +42,17 @@ func applicationCommand(args []string) (bool, error) {
 	case "evidence":
 		err = evidence.Run(args[1:])
 	case "upgrade":
-		if len(args) > 2 {
-			return true, errors.New("usage: network-domain-engine upgrade [service.json]")
+		flags := flag.NewFlagSet("upgrade", flag.ContinueOnError)
+		native := flags.Bool("native-dns", false, "replace the external DNS backend")
+		if err := flags.Parse(args[1:]); err != nil {
+			return true, err
+		}
+		if flags.NArg() > 1 {
+			return true, errors.New("usage: network-domain-engine upgrade [-native-dns] [service.json]")
 		}
 		config := service.ConfigPath
-		if len(args) == 2 {
-			config = args[1]
+		if flags.NArg() == 1 {
+			config = flags.Arg(0)
 		}
 		executable, e := os.Executable()
 		if e != nil {
@@ -56,19 +62,20 @@ func applicationCommand(args []string) (bool, error) {
 		if e != nil {
 			return true, e
 		}
-		_, err = deploy.Consolidate(ctx, filepath.Dir(executable), config, os.Stdout, false)
+		_, err = deploy.Consolidate(ctx, filepath.Dir(executable), config, os.Stdout, false, *native)
 	case "maintenance":
 		err = maintenanceCommand(ctx, args[1:])
 	case "service", "check-service":
 		flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 		path := flags.String("c", service.ConfigPath, "unified service configuration")
 		live := flags.Bool("live", false, "run the isolated proxy preflight without installing")
+		native := flags.Bool("native-dns", false, "include native DNS migration preflight")
 		if err = flags.Parse(args[1:]); err == nil {
 			if flags.NArg() != 0 {
 				return true, errors.New("positional service arguments rejected")
 			}
 			if args[0] == "service" {
-				if *live {
+				if *live || *native {
 					return true, errors.New("live preflight is only available with check-service")
 				}
 				err = service.Run(ctx, *path)
@@ -77,9 +84,16 @@ func applicationCommand(args []string) (bool, error) {
 				if e != nil {
 					return true, e
 				}
-				_, err = deploy.Consolidate(ctx, filepath.Dir(executable), *path, os.Stdout, true)
+				_, err = deploy.Consolidate(ctx, filepath.Dir(executable), *path, os.Stdout, true, *native)
 			} else {
-				_, err = service.Load(*path, false)
+				if *native {
+					return true, errors.New("-native-dns requires -live")
+				}
+				var c service.Config
+				c, err = service.Load(*path, false)
+				if err == nil && c.Version == 2 {
+					err = service.CheckInstallation(c)
+				}
 			}
 		}
 	case "worker":
@@ -133,6 +147,12 @@ func maintenanceCommand(ctx context.Context, args []string) error {
 		paths = runtimecheck.Production
 	} else if err != nil {
 		return err
+	} else {
+		c, err := service.Load(service.ConfigPath, true)
+		if err != nil {
+			return err
+		}
+		paths.NativeDNS = c.Version == 2
 	}
 	d := deploy.New(paths, "", os.Stdout)
 	d.Context = ctx
@@ -222,6 +242,9 @@ func worker(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return errors.New("missing worker role")
 	}
+	if args[0] == "dns" {
+		return dnsWorker(ctx, args[1:])
+	}
 	if args[0] == "status" {
 		if os.Geteuid() == 0 {
 			return errors.New("status publishing requires its unprivileged account")
@@ -259,6 +282,7 @@ func worker(ctx context.Context, args []string) error {
 	case "health":
 		job := healthcheck.ProductionJob(ctx)
 		job.Paths = runtimecheck.Unified()
+		job.Paths.NativeDNS = c.Version == 2
 		return job.HealthCheck()
 	case "observe":
 		log := dnsobserver.NewLogger("/var/log/network-split-dns-event-route-agent.log")
@@ -270,6 +294,48 @@ func worker(ctx context.Context, args []string) error {
 	default:
 		return errors.New("unknown worker role")
 	}
+}
+
+func dnsWorker(ctx context.Context, args []string) error {
+	if os.Geteuid() != -2 && uint64(os.Geteuid()) != 4294967294 {
+		return errors.New("DNS worker must run as nobody")
+	}
+	flags := flag.NewFlagSet("worker dns", flag.ContinueOnError)
+	path := flags.String("policy", "", "DNS policy")
+	wired := flags.String("wired-interface", "", "domestic interface")
+	wifi := flags.String("wifi-interface", "", "foreign interface")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || !filepath.IsAbs(*path) {
+		return errors.New("invalid DNS worker arguments")
+	}
+	c, err := dnsservice.Load(*path)
+	if err != nil {
+		return err
+	}
+	hosts, err := dnsservice.LoadHosts()
+	if err != nil {
+		return err
+	}
+	r, err := dnsservice.NewResolver(c, *wired, *wifi, hosts)
+	if err != nil {
+		return err
+	}
+	allowed, err := dnsservice.LocalNetworks()
+	if err != nil {
+		return err
+	}
+	logger := &dnsservice.QueryLogger{Path: c.QueryLog}
+	if err := logger.Check(); err != nil {
+		return err
+	}
+	l, err := c.ActivatedListeners()
+	if err != nil {
+		return err
+	}
+	s := dnsservice.Server{Resolver: r, Allowed: allowed, Logger: logger}
+	return s.Serve(ctx, l)
 }
 
 func statusCommand(ctx context.Context, args []string, unified bool) error {
@@ -298,6 +364,9 @@ func statusCommand(ctx context.Context, args []string, unified bool) error {
 	if unified {
 		collector.Launchd = service.JobsDirectory
 		collector.ObserverProgram = service.Binary
+		if _, err := os.Lstat(filepath.Join(service.JobsDirectory, service.NativeDNSLabel+".plist")); err == nil {
+			collector.NativeDNSProgram = service.Binary
+		}
 	}
 	report := collector.Collect(ctx)
 	if ctx.Err() == context.Canceled {
