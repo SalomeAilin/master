@@ -48,6 +48,14 @@ jobs:
       - name: Offline integration
         working-directory: engine
         run: go test -tags integration -run Integration -timeout 5m .
+      - name: Unprivileged DNS socket activation
+        working-directory: engine
+        run: |
+          stage=$(mktemp -d /private/tmp/network-dns-activation.XXXXXXXX)
+          trap 'rm -rf "$stage"' EXIT
+          chmod 755 "$stage"
+          CGO_ENABLED=1 go test -c -o "$stage/dnsservice.test" ./internal/dnsservice
+          sudo env NETWORK_SPLIT_LAUNCHD_TEST=1 "$stage/dnsservice.test" -test.run '^TestLaunchdPassesLowPortSocketsToNobody$' -test.v
       - name: Remote access configuration regression
         run: zsh tests/remote_access.zsh
       - name: Patch whitespace

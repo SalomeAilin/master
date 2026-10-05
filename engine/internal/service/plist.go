@@ -72,7 +72,7 @@ func Plist(definition map[string]any) ([]byte, error) {
 		switch v.(type) {
 		case map[string]any:
 			tag = "dict"
-		case []string:
+		case []string, []any:
 			tag = "array"
 		case string:
 			tag = "string"
@@ -105,6 +105,12 @@ func Plist(definition map[string]any) ([]byte, error) {
 		case []string:
 			for _, s := range v {
 				if err := value(s); err != nil {
+					return err
+				}
+			}
+		case []any:
+			for _, item := range v {
+				if err := value(item); err != nil {
 					return err
 				}
 			}
