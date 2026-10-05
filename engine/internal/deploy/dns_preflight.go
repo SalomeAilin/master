@@ -39,6 +39,13 @@ func (d *Deployer) nativePreflight(c service.Config) (resultErr error) {
 			resultErr = errors.Join(resultErr, err)
 		}
 	}()
+	// launchd reports canonical paths, including /private/var for /var. Keep
+	// that exact identity from registration through verification and cleanup.
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return err
+	}
+	dir = canonical
 	if err := os.Chmod(dir, 0o755); err != nil {
 		return err
 	}
