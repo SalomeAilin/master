@@ -755,3 +755,31 @@ func TestKernelInterfaceConstraint(t *testing.T) {
 	}
 	c.Close()
 }
+
+func TestLastDialAttemptKeepsRemainingBudget(t *testing.T) {
+	addresses := []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("192.0.2.3")}
+	for _, count := range []int{1, 3} {
+		var budgets []time.Duration
+		var targets []string
+		dial := func(ctx context.Context, iface, address string) (net.Conn, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok || iface != "en1" {
+				t.Fatal("attempt lacks a deadline or interface")
+			}
+			budgets, targets = append(budgets, time.Until(deadline)), append(targets, address)
+			return nil, fmt.Errorf("unreachable %s", address)
+		}
+		_, err := dialEach(context.Background(), dial, "en1", addresses[:count], "443")
+		if err == nil || !strings.Contains(err.Error(), addresses[count-1].String()) || len(budgets) != count || targets[count-1] != addresses[count-1].String()+":443" {
+			t.Fatal(count, err, targets)
+		}
+		for _, budget := range budgets[:count-1] {
+			if budget > dialAttempt {
+				t.Fatal("early address kept the whole budget", budget)
+			}
+		}
+		if last := budgets[count-1]; last <= dialAttempt+time.Second || last > dialBudget {
+			t.Fatal("last address lost the remaining budget", count, last)
+		}
+	}
+}

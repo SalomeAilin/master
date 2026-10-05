@@ -112,7 +112,7 @@ func TestQueryLogRejectsLinksAndWorldWritableFiles(t *testing.T) {
 	if err := os.Chmod(path, 0o666); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.Write(q, answer(q, 60), "127.0.0.1:123", false, nil); err == nil {
+	if err := l.Write(q, answer(q, 60), "127.0.0.1:123", false, 0, nil); err == nil {
 		t.Fatal("unsafe log accepted")
 	}
 	os.Chmod(path, 0o600)
@@ -121,7 +121,7 @@ func TestQueryLogRejectsLinksAndWorldWritableFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	l.Path = link
-	if err := l.Write(q, answer(q, 60), "127.0.0.1:123", false, nil); err == nil {
+	if err := l.Write(q, answer(q, 60), "127.0.0.1:123", false, 0, nil); err == nil {
 		t.Fatal("symlink accepted")
 	}
 }
@@ -393,6 +393,24 @@ func TestConcurrentRequestsShareOnlyCacheableWork(t *testing.T) {
 	}
 }
 
+func TestQueryLogRecordsOnlySlowAnswerDurations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "query.log")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	q := question("example.cn.", dns.TypeA)
+	l := &QueryLogger{Path: path}
+	for _, elapsed := range []time.Duration{900 * time.Millisecond, 1834 * time.Millisecond} {
+		if err := l.Write(q, answer(q, 60), "127.0.0.1:123", false, elapsed, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Count(string(b), " elapsed ") != 1 || !strings.Contains(string(b), " 2 127.0.0.1:123 elapsed 1834ms\n") {
+		t.Fatal(string(b))
+	}
+}
+
 func TestQueryLogBoundsGrowthAndRestrictsCNAMEAttribution(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "query.log")
@@ -401,7 +419,7 @@ func TestQueryLogBoundsGrowthAndRestrictsCNAMEAttribution(t *testing.T) {
 	m := responseFor(q, 0)
 	m.Answer = []dns.RR{&dns.CNAME{Hdr: dns.RR_Header{Name: "example.cn.", Rrtype: dns.TypeCNAME, Class: 1, Ttl: 60}, Target: "cdn.test."}, &dns.A{Hdr: dns.RR_Header{Name: "cdn.test.", Rrtype: dns.TypeA, Class: 1, Ttl: 60}, A: net.ParseIP("223.5.5.5")}, &dns.A{Hdr: dns.RR_Header{Name: "unrelated.test.", Rrtype: dns.TypeA, Class: 1, Ttl: 60}, A: net.ParseIP("119.29.29.29")}}
 	l := &QueryLogger{Path: path}
-	if err := l.Write(q, m, "127.0.0.1:1234", false, nil); err != nil {
+	if err := l.Write(q, m, "127.0.0.1:1234", false, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(path)
@@ -411,7 +429,7 @@ func TestQueryLogBoundsGrowthAndRestrictsCNAMEAttribution(t *testing.T) {
 	if err := os.Truncate(path, QueryLogLimit); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.Write(q, m, "127.0.0.1:1234", false, nil); err != nil {
+	if err := l.Write(q, m, "127.0.0.1:1234", false, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	info, _ := os.Stat(path)

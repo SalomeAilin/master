@@ -20,6 +20,11 @@ import (
 	"network-owned-engine/internal/policy"
 )
 
+// ForwardBudget bounds one forwarded query across its whole upstream group.
+// Lookups that judge DNS health must wait longer, or a slow answer that still
+// succeeds is reported as a failure.
+const ForwardBudget = 5 * time.Second
+
 type ExchangeFunc func(context.Context, *dns.Msg, netip.Addr, string, string) (*dns.Msg, error)
 type flight struct {
 	done     chan struct{}
@@ -336,7 +341,7 @@ func (r *Resolver) forward(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	if domestic {
 		iface = r.Wired
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, ForwardBudget)
 	defer cancel()
 	r.mu.Lock()
 	start := max(0, slices.Index(servers, r.preferred[iface]))

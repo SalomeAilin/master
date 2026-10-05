@@ -65,6 +65,32 @@ func TestRepositoryDNSPolicyCanBeMigrated(t *testing.T) {
 	}
 }
 
+// A domestic domain without a domestic DNS rule still resolves, but through the
+// Wi-Fi upstreams, so its lookups depend on the hotspot.
+func TestRepositoryDomesticDomainsUseDomesticDNS(t *testing.T) {
+	policy, err := os.ReadFile("../../../config/dnsmasq-network-split.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := Parse(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domains, err := os.ReadFile("../../../config/domestic_domains.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(domains), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" || strings.HasPrefix(name, "#") {
+			continue
+		}
+		if _, domestic := c.Select(name); !domestic {
+			t.Errorf("domestic domain %s has no domestic DNS rule", name)
+		}
+	}
+}
+
 func TestPolicyLoaderRejectsLinksAndWritableInputs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy")

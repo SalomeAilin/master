@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -60,7 +61,11 @@ func AnswerAddresses(q *dns.Msg, m *dns.Msg) []string {
 	return addresses
 }
 
-func (l *QueryLogger) Write(q, m *dns.Msg, client string, cached bool, cause error) error {
+// Answers slower than this record their duration, so a client that gave up
+// can be told apart from an upstream that never answered.
+const slowAnswer = time.Second
+
+func (l *QueryLogger) Write(q, m *dns.Msg, client string, cached bool, elapsed time.Duration, cause error) error {
 	if len(q.Question) != 1 {
 		return nil
 	}
@@ -82,6 +87,9 @@ func (l *QueryLogger) Write(q, m *dns.Msg, client string, cached bool, cause err
 			text = text[:512]
 		}
 		fmt.Fprintf(&batch, "%sfailure %q\n", prefix, text)
+	}
+	if elapsed >= slowAnswer {
+		fmt.Fprintf(&batch, "%selapsed %dms\n", prefix, elapsed.Milliseconds())
 	}
 	if batch.Len() > 8192 {
 		return nil

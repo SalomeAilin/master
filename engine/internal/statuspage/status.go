@@ -27,6 +27,9 @@ import (
 	"network-owned-engine/internal/runtimecheck"
 )
 
+// A slow answer that the forwarder still delivers is not a lookup failure.
+const lookupTimeout = dnsservice.ForwardBudget + time.Second
+
 type Row struct{ Name, Address, State, Detail string }
 type Report struct {
 	Updated         time.Time
@@ -215,7 +218,7 @@ func (c *Collector) Collect(ctx context.Context) Report {
 		if ips, ok := lookupCache[name]; ok {
 			return ips
 		}
-		child, cancel := context.WithTimeout(ctx, 2*time.Second)
+		child, cancel := context.WithTimeout(ctx, lookupTimeout)
 		defer cancel()
 		ips, err := lookup(child, name)
 		if err != nil {
@@ -311,7 +314,7 @@ func (c *Collector) Collect(ctx context.Context) Report {
 	var nonce [8]byte
 	_, randomErr := rand.Read(nonce[:])
 	probeName := "network-split-" + hex.EncodeToString(nonce[:]) + ".invalid."
-	child, cancel := context.WithTimeout(ctx, 2*time.Second)
+	child, cancel := context.WithTimeout(ctx, lookupTimeout)
 	ips, err := lookup(child, probeName)
 	cancel()
 	var dnsErr *net.DNSError

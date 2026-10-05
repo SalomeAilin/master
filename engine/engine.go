@@ -122,16 +122,31 @@ func (e *engine) resolve(ctx context.Context, address string) (plan, error) {
 	return p, nil
 }
 
+const (
+	dialBudget  = 10 * time.Second
+	dialAttempt = 3 * time.Second
+)
+
 func dialAddresses(ctx context.Context, iface string, ips []netip.Addr, port string) (net.Conn, error) {
+	return dialEach(ctx, interfaceDial, iface, ips, port)
+}
+
+// Every address but the last gets a short attempt so a dead address does not
+// stall the rest. The last, often the only, address keeps the remaining budget
+// for SYN retransmissions on a lossy hotspot.
+func dialEach(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error), iface string, ips []netip.Addr, port string) (net.Conn, error) {
 	if len(ips) == 0 {
 		return nil, errors.New("empty destination address list")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, dialBudget)
 	defer cancel()
 	var last error
-	for _, ip := range ips {
-		attempt, stop := context.WithTimeout(ctx, 3*time.Second)
-		connection, err := interfaceDial(attempt, iface, net.JoinHostPort(ip.String(), port))
+	for index, ip := range ips {
+		attempt, stop := ctx, context.CancelFunc(func() {})
+		if index < len(ips)-1 {
+			attempt, stop = context.WithTimeout(ctx, dialAttempt)
+		}
+		connection, err := dial(attempt, iface, net.JoinHostPort(ip.String(), port))
 		stop()
 		if err == nil {
 			return connection, nil

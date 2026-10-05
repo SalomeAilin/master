@@ -101,12 +101,13 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, q *dns.Msg) {
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, 6*time.Second)
 	defer cancel()
+	started := time.Now()
 	m, cached, err := s.Resolver.Resolve(ctx, q)
 	if err != nil || m == nil {
 		m = responseFor(q, dns.RcodeServerFailure)
 	}
 	if s.Logger != nil {
-		s.Logger.Write(q, m, w.RemoteAddr().String(), cached, err)
+		s.Logger.Write(q, m, w.RemoteAddr().String(), cached, time.Since(started), err)
 	}
 	if _, udp := w.RemoteAddr().(*net.UDPAddr); udp {
 		size := 512

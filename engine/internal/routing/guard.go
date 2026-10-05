@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"network-owned-engine/internal/dnsservice"
 	"network-owned-engine/internal/healthcheck"
 	"network-owned-engine/internal/policy"
 	"network-owned-engine/internal/runtimecheck"
@@ -128,7 +129,7 @@ func New(c Config) *Guard {
 		return dialer.DialContext(ctx, network, net.JoinHostPort(c.DNS, "53"))
 	}}
 	g.Lookup = func(ctx context.Context, name string) ([]netip.Addr, error) {
-		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, dnsservice.ForwardBudget+time.Second)
 		defer cancel()
 		return resolver.LookupNetIP(ctx, "ip4", name)
 	}
