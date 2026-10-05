@@ -96,6 +96,19 @@ func TestDefinitionsUseOneProjectExecutableAndPreservePrivileges(t *testing.T) {
 	}
 }
 
+func TestPlistBooleansUseLaunchdCompatibleEmptyElements(t *testing.T) {
+	data, err := Plist(map[string]any{"enabled": true, "disabled": false, "literal": "<true></true>"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "<true/>") || !strings.Contains(string(data), "<false/>") || strings.Contains(string(data), "</true>") || strings.Contains(string(data), "</false>") {
+		t.Fatal(string(data))
+	}
+	if !strings.Contains(string(data), "&lt;true&gt;&lt;/true&gt;") {
+		t.Fatal("literal string was changed", string(data))
+	}
+}
+
 func TestConfigurationRejectsUnsafePathsAndRootStatus(t *testing.T) {
 	for _, variant := range []string{"version", "same-interface", "root-status", "outside-home", "duplicate-output", "routing-path-alias"} {
 		t.Run(variant, func(t *testing.T) {
@@ -302,5 +315,51 @@ func TestWorkerBootstrapRetriesTheKnownLaunchdUnloadRace(t *testing.T) {
 	}
 	if created, err := s.bootstrap(context.Background(), job); err != nil || !created || calls != 2 {
 		t.Fatal(created, calls, err)
+	}
+}
+
+// This opt-in test registers inert jobs in the GUI domain, or system as root.
+// It never runs a worker or touches a production label or startup directory.
+func TestLaunchdAcceptsGeneratedDefinitions(t *testing.T) {
+	if os.Getenv("NETWORK_SPLIT_LAUNCHD_TEST") != "1" {
+		t.Skip("set NETWORK_SPLIT_LAUNCHD_TEST=1 for the native launchd parser")
+	}
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	if os.Getuid() == 0 {
+		domain = "system"
+	}
+	jobs := append(Jobs(testConfig(t)), Job{Definition: MainDefinition()})
+	for i, job := range jobs {
+		label := fmt.Sprintf("com.local.network-split-test.%d.%d.%d", os.Getpid(), time.Now().UnixNano(), i)
+		job.Definition["Label"] = label
+		job.Definition["ProgramArguments"] = []string{"/usr/bin/true"}
+		job.Definition["RunAtLoad"], job.Definition["KeepAlive"] = false, false
+		for _, key := range []string{"UserName", "StartInterval", "EnvironmentVariables", "StandardOutPath", "StandardErrorPath"} {
+			delete(job.Definition, key)
+		}
+		data, err := Plist(job.Definition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), label+".plist")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("/usr/bin/plutil", "-lint", path).CombinedOutput(); err != nil {
+			t.Fatal(string(out), err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		out, err := exec.CommandContext(ctx, "/bin/launchctl", "bootstrap", domain, path).CombinedOutput()
+		cancel()
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanupOut, cleanupErr := exec.CommandContext(cleanupCtx, "/bin/launchctl", "bootout", domain+"/"+label).CombinedOutput()
+		cleanupCancel()
+		if err != nil {
+			t.Fatalf("launchd rejected definition %d: %v %s", i, err, out)
+		}
+		if cleanupErr != nil {
+			t.Fatalf("could not remove test job %s: %v %s", label, cleanupErr, cleanupOut)
+		}
+		t.Logf("accepted and removed %s/%s", domain, label)
 	}
 }

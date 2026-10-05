@@ -38,6 +38,13 @@ jobs:
       - name: Go vet
         working-directory: engine
         run: go vet ./...
+      - name: Native launchd definition acceptance
+        working-directory: engine
+        run: |
+          probe="$RUNNER_TEMP/network-service.test"
+          trap 'rm -f "$probe"' EXIT
+          go test -c -o "$probe" ./internal/service
+          sudo env NETWORK_SPLIT_LAUNCHD_TEST=1 "$probe" -test.run '^TestLaunchdAcceptsGeneratedDefinitions$' -test.v
       - name: Offline integration
         working-directory: engine
         run: go test -tags integration -run Integration -timeout 5m .

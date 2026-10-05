@@ -128,7 +128,13 @@ func Plist(definition map[string]any) ([]byte, error) {
 	if err := enc.Flush(); err != nil {
 		return nil, err
 	}
-	return append(out.Bytes(), '\n'), nil
+	// launchd rejects paired boolean tags even though plutil accepts them.
+	// XML-escaped string values cannot contain these literal tag sequences.
+	data := out.Bytes()
+	for _, tag := range []string{"true", "false"} {
+		data = bytes.ReplaceAll(data, []byte("<"+tag+"></"+tag+">"), []byte("<"+tag+"/>"))
+	}
+	return append(data, '\n'), nil
 }
 
 type LaunchInfo struct {
