@@ -2,7 +2,7 @@
 
 境外走 Wi-Fi，国内走有线；代理连接失败时不换到另一条线路。
 
-**2026-10-05 已上线 0.2.0-unified。** 运行程序与构建产物哈希一致，代理、DNS 和地址策略配置未变；新健康样本、状态页发布回执及真实连接出口已核对。此次没有重启 Mac 或人为断开 Wi-Fi，短期验收不等于长期稳定保证。
+**2026-10-05 已上线 0.3.0-native-dns。** DNS 已由同一个 Go 主程序接管，旧 dnsmasq 的进程、启动定义、独立二进制和防火墙放行项已退役。安装哈希与构建产物一致，代理、DNS 和地址策略配置未变；UDP/TCP DNS、新健康样本、状态页发布回执及实际 HTML 哈希均通过验收。真实套接字与日志确认抖音、CSDN 走有线，GitHub 走 Wi-Fi。此次没有重启 Mac、人为断开 Wi-Fi 或进行视频播放测试，短期验收不等于长期稳定保证。
 
 ## 平时使用
 
@@ -18,7 +18,7 @@
 
 ## 一个程序，多进程
 
-项目自有功能都编入 `network-domain-engine`，不再分别构建策略、观察、健康、状态、部署和取证程序。后台业务不调用旧 Shell/Python 守护。主程序启动内部工作进程，launchd 负责重启与身份隔离：
+代理、DNS 和项目维护功能都编入 `network-domain-engine`，不再分别构建策略、观察、健康、状态、部署和取证程序。后台业务不调用旧 Shell/Python 守护。主程序启动内部工作进程，launchd 负责重启与身份隔离：
 
 | 内部职责 | 身份与调度 |
 | --- | --- |
@@ -27,13 +27,13 @@
 | 默认路由、国内路由 | root，原生 Go，保留现有锁和故障阻断顺序 |
 | 健康检查 | root，每 30 秒唤起；实际探测仍按 30/60/120 秒调整 |
 | 状态页 | 原用户，每 300 秒更新原文件，不以 root 写用户目录 |
-| dnsmasq | 保留既有外部 DNS 程序及许可证，由主程序管理 |
+| DNS 服务 | nobody，常驻；同一主程序接收 launchd 交付的 UDP/TCP 53 端口 |
 
 唯一自动启动定义是 `/Library/LaunchDaemons/com.local.network-split-service.plist`。内部任务定义放在 `/usr/local/etc/network-split-jobs/`，不会被系统目录扫描独立启动；全部由 [service 包](engine/internal/service/)生成，不另存一套手工模板。主程序重启时只接管路径、程序及参数均匹配的任务，不重启健康的工作进程。
 
-多进程不是多个需要人工安装的产品。它保留了权限和故障隔离；dnsmasq 仍是外部依赖，不能称整套系统全部自研或只有一个进程。
+多进程用于权限和故障隔离，只需维护同一个项目可执行程序；系统仍依赖 macOS 和第三方协议库，不能称只有一个进程或所有代码全部自研。
 
-候选版 `0.3.0-native-dns` 已把 DNS 编入同一主程序，尚未替换线上 dnsmasq。报文处理使用固定版本 `miekg/dns v1.1.73`；出口选择、缓存、安全策略和部署仍由本项目实现。DNS 工作进程以 nobody 运行，53 端口由 launchd 创建并交接，不让解析报文的进程以 root 常驻。需要 `CGO_ENABLED=1` 调用 macOS 套接字激活接口。
+DNS 报文处理使用编译进主程序的 `miekg/dns v1.1.73`，运行时不调用 dnsmasq；出口选择、缓存、安全策略和部署由本项目实现。DNS 工作进程以 nobody 运行，53 端口由 launchd 创建并交接，不让解析报文的进程以 root 常驻。需要 `CGO_ENABLED=1` 调用 macOS 套接字激活接口。
 
 <details>
 <summary>维护：验证、迁移和更新</summary>
@@ -71,7 +71,7 @@ CGO_ENABLED=1 GOTOOLCHAIN=go1.26.8 go build -trimpath -buildvcs=false \
 
 ## 授权上线
 
-管理员凭据只能输入系统授权窗口或本机终端，不发到聊天。先单独预检，再确认允许短暂中断后切换：
+管理员凭据只能输入系统授权窗口或本机终端，不发到聊天。优先直接调用 Go 程序；用户明确同意时，可以用 AppleScript 唤起系统授权窗口，但预检、安装与回退仍由 Go 完成，不再另写业务脚本。先单独预检，再确认允许短暂中断后切换：
 ```sh
 sudo "$STAGE/network-domain-engine" check-service -c "$STAGE/service.json" -live
 sudo "$STAGE/network-domain-engine" upgrade "$STAGE/service.json"
@@ -118,7 +118,7 @@ sudo "$STAGE/network-domain-engine" upgrade -native-dns
 
 | 日志 | 轮转或压缩 |
 | --- | --- |
-| DNS 查询日志 | 观察进程消费后在 64 MiB 处压缩；候选内置 DNS 还会在达到阈值时暂停写入，最多超出一批 8 KiB；旧 dnsmasq 没有此写入上限 |
+| DNS 查询日志 | 观察进程消费后在 64 MiB 处压缩；内置 DNS 达到阈值时暂停写入，最多超出一批 8 KiB |
 | 路由、观察、健康日志 | 沿用 newsyslog；路由十份归档，观察和健康五份，每份阈值 1 MiB |
 | 代理 service.log | 新写文件 2 MiB，三份归档 |
 | 用户状态日志 | 每份 1 MiB，三份归档，已有超大文件不静默截断 |
@@ -136,7 +136,7 @@ sudo "$STAGE/network-domain-engine" upgrade -native-dns
 - 规则每小时经 Wi-Fi HTTPS/ETag 重验证，每份最多 16 MiB；无效更新保留最后可用规则。热点按流量计费，不增加重复保活。
 - 不使用代理的程序仍依赖周期性 IP 路由守护，存在检测空档，不能承诺即时阻断。Wi-Fi 不可用时先添加境外拒绝路由，再允许国内有线默认路由；恢复后先确认 Wi-Fi 默认路由，才解除阻断。
 - DNS 观察按进程、查询 ID 和客户端关联 CNAME；不把共享 CDN 永久当成国内。所有 DNS 派生路由必须再次通过地址策略，健康检查不因 HTTP 错误或单次延迟重启服务。
-- dnsmasq 固定程序须符合 `root:wheel:555`；异常时报警，不从 Homebrew 自动复制执行。统一主程序启动与故障恢复均保留此检查。
+- 旧版服务配置仅用于迁移与恢复兼容，仍检查 dnsmasq 的 `root:wheel:555` 安装基线，不从 Homebrew 自动复制执行。当前内置 DNS 模式不依赖该程序。
 - 内置 DNS 使用与现有 DNS 相同的上游、域名后缀、监听地址及 TTL 设置。上游查询绑定选定网卡，UDP 截断后只在同接口改用 TCP；不会借另一线路重试。缓存最多 10000 项并设估算内存上限 32 MiB；失败不缓存，带客户端选项的查询不共享缓存。保留 hosts、私网反查、AAAA 过滤、环路检测和本地网段访问限制，拒绝上游返回的私网 A 地址及服务地址提示。它是有限的 DNS 转发器，不提供 DHCP、TFTP、DNSSEC 验证或 DoH；遇到未支持的旧配置项会拒绝迁移。
 - 内置 DNS 模式要求主程序 `root:wheel:755`、工作进程 nobody 和严格匹配的 launchd 套接字定义。状态页按实际后端核对权限，不以删掉旧检查来掩盖不一致。
 
