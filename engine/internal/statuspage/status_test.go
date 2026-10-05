@@ -2,6 +2,7 @@ package statuspage
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -221,6 +222,34 @@ func TestStatusPublicationEscapesAndBoundsHistory(t *testing.T) {
 		if strings.Contains(entry.Name(), ".tmp.") {
 			t.Fatal("temporary output retained", entry.Name())
 		}
+	}
+}
+
+func TestPublicationReceiptRefreshesWithoutRepeatingUnchangedLog(t *testing.T) {
+	dir := t.TempDir()
+	html, state, log := filepath.Join(dir, "page"), filepath.Join(dir, "state"), filepath.Join(dir, "log")
+	r := Report{Updated: time.Unix(1000, 0), State: "OK"}
+	if err := r.Publish(html, state, log); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(log)
+	r.Updated = r.Updated.Add(time.Second)
+	if err := r.Publish(html, state, log); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(state)
+	var snapshot Snapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(html)
+	digest := sha256.Sum256(body)
+	if snapshot.HTMLPath != html || snapshot.HTMLSHA256 != fmt.Sprintf("%x", digest) || snapshot.HTMLBytes != int64(len(body)) || !snapshot.Checked.Equal(r.Updated) || snapshot.Published.IsZero() {
+		t.Fatal(snapshot)
+	}
+	after, _ := os.ReadFile(log)
+	if string(before) != string(after) {
+		t.Fatal("receipt refresh grew the unchanged log")
 	}
 }
 

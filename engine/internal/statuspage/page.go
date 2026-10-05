@@ -2,6 +2,7 @@ package statuspage
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -68,6 +69,16 @@ func atomicWrite(path string, data []byte) error {
 }
 
 const logLimit = 1 << 20
+
+// Snapshot is the existing state file plus a receipt written only after the
+// HTML is published. Administrators need not read privacy-protected Documents.
+type Snapshot struct {
+	State                string
+	Checks, Domains      []Row
+	Checked, Published   time.Time
+	HTMLPath, HTMLSHA256 string
+	HTMLBytes            int64
+}
 
 // RecordFailure uses the existing user log when publication fails. The status
 // worker has no root-owned stdout/stderr files and must not need root to start.
@@ -153,10 +164,9 @@ func (r Report) Publish(htmlPath, statePath, logPath string) error {
 	if err := atomicWrite(htmlPath, html); err != nil {
 		return err
 	}
-	summary := struct {
-		State           string
-		Checks, Domains []Row
-	}{State: r.State, Checks: append([]Row(nil), r.Checks...), Domains: r.Domains}
+	digest := sha256.Sum256(html)
+	summary := Snapshot{State: r.State, Checks: append([]Row(nil), r.Checks...), Domains: r.Domains,
+		Checked: r.Updated, Published: time.Now(), HTMLPath: htmlPath, HTMLSHA256: fmt.Sprintf("%x", digest), HTMLBytes: int64(len(html))}
 	for i := range summary.Checks {
 		if strings.HasPrefix(summary.Checks[i].Name, "https://") {
 			summary.Checks[i].Detail, _, _ = strings.Cut(summary.Checks[i].Detail, ";")
@@ -170,8 +180,9 @@ func (r Report) Publish(htmlPath, statePath, logPath string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if bytes.Equal(previous, data) {
-		return nil
+	var prior Snapshot
+	if json.Unmarshal(previous, &prior) == nil && prior.State == summary.State && slices.Equal(prior.Checks, summary.Checks) && slices.Equal(prior.Domains, summary.Domains) {
+		return atomicWrite(statePath, data)
 	}
 	var issues []Row
 	count := 0

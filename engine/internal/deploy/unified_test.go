@@ -14,6 +14,7 @@ import (
 
 	"network-owned-engine/internal/healthcheck"
 	"network-owned-engine/internal/service"
+	"network-owned-engine/internal/statuspage"
 )
 
 type unifiedFixture struct {
@@ -269,29 +270,64 @@ func TestConsolidationRejectsDuplicateRuleKindsBeforePreflight(t *testing.T) {
 	}
 }
 
-func TestUnifiedStatusAcceptanceRequiresFreshOwnedHealthyPage(t *testing.T) {
+func TestUnifiedStatusAcceptanceRequiresFreshOwnedHealthyReceipt(t *testing.T) {
 	home := t.TempDir()
-	c := service.Config{Status: service.StatusConfig{Home: home, Output: filepath.Join(home, "status.html")}}
+	c := service.Config{Status: service.StatusConfig{Home: home, Output: filepath.Join(home, "status.html"), State: filepath.Join(home, "state")}}
 	start := time.Now().Add(-time.Second)
-	writeTestFile(t, c.Status.Output, `<div class="status OK">OK</div>`)
-	if err := acceptStatusPage(c, start); err != nil {
+	r := statuspage.Report{Updated: time.Now(), State: "OK", Checks: []statuspage.Row{{State: "ok"}}, Domains: []statuspage.Row{{State: "wired"}}}
+	if err := r.Publish(c.Status.Output, c.Status.State, filepath.Join(home, "log")); err != nil {
 		t.Fatal(err)
 	}
-	if err := acceptStatusPage(c, time.Now().Add(time.Second)); err == nil {
-		t.Fatal("stale page accepted")
-	}
-	writeTestFile(t, c.Status.Output, `<div class="status BAD">BAD</div>`)
-	if err := acceptStatusPage(c, start); err == nil {
-		t.Fatal("unhealthy page accepted")
-	}
-	os.Remove(c.Status.Output)
-	outside := filepath.Join(t.TempDir(), "other.html")
-	writeTestFile(t, outside, `<div class="status OK">OK</div>`)
-	if err := os.Symlink(outside, c.Status.Output); err != nil {
+	if err := acceptStatusReport(c, start); err != nil {
 		t.Fatal(err)
 	}
-	if err := acceptStatusPage(c, start); err == nil {
-		t.Fatal("external page accepted")
+	if err := acceptStatusReport(c, time.Now().Add(time.Second)); err == nil {
+		t.Fatal("stale receipt accepted")
+	}
+	data, _ := os.ReadFile(c.Status.State)
+	var valid statuspage.Snapshot
+	if err := json.Unmarshal(data, &valid); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"state", "digest", "path", "size", "checked", "published", "missing-checks"} {
+		snapshot := valid
+		switch bad {
+		case "state":
+			snapshot.State = "BAD"
+		case "digest":
+			snapshot.HTMLSHA256 = "wrong"
+		case "path":
+			snapshot.HTMLPath = filepath.Join(home, "other.html")
+		case "size":
+			snapshot.HTMLBytes = 0
+		case "checked":
+			snapshot.Checked = start.Add(-time.Second)
+		case "published":
+			snapshot.Published = start.Add(-time.Second)
+		case "missing-checks":
+			snapshot.Checks = nil
+		}
+		encoded, _ := json.Marshal(snapshot)
+		writeTestFile(t, c.Status.State, string(encoded))
+		if err := acceptStatusReport(c, start); err == nil {
+			t.Fatal("invalid receipt accepted", bad)
+		}
+	}
+	writeTestFile(t, c.Status.State, `{"State":"OK","Checks":[{"State":"ok"}],"Domains":[{"State":"wired"}]}`)
+	if err := acceptStatusReport(c, time.Time{}); err != nil {
+		t.Fatal("legacy preflight rejected", err)
+	}
+	if err := acceptStatusReport(c, start); err == nil {
+		t.Fatal("legacy state accepted as a new publication")
+	}
+	os.Remove(c.Status.State)
+	outside := filepath.Join(t.TempDir(), "other.state")
+	writeTestFile(t, outside, string(data))
+	if err := os.Symlink(outside, c.Status.State); err != nil {
+		t.Fatal(err)
+	}
+	if err := acceptStatusReport(c, start); err == nil {
+		t.Fatal("external receipt accepted")
 	}
 }
 

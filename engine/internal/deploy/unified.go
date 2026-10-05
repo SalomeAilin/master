@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 
 	"network-owned-engine/internal/runtimecheck"
 	"network-owned-engine/internal/service"
+	"network-owned-engine/internal/statuspage"
 )
 
 type unifiedLayout struct {
@@ -170,7 +172,7 @@ func (d *Deployer) waitUnified(c service.Config, previous int64, started time.Ti
 			if err := d.acceptHealthSample(previous); err != nil {
 				return err
 			}
-			if err := acceptStatusPage(c, started); err != nil {
+			if err := acceptStatusReport(c, started); err != nil {
 				return err
 			}
 			return d.health(ProxyPort)
@@ -183,23 +185,29 @@ func (d *Deployer) waitUnified(c service.Config, previous int64, started time.Ti
 	return errors.New("unified workers did not become ready")
 }
 
-func acceptStatusPage(c service.Config, since time.Time) error {
+func acceptStatusReport(c service.Config, since time.Time) error {
 	root, err := os.OpenRoot(c.Status.Home)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	path, err := filepath.Rel(c.Status.Home, c.Status.Output)
+	path, err := filepath.Rel(c.Status.Home, c.Status.State)
 	if err != nil {
 		return err
 	}
 	info, err := root.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 4<<20 || !info.ModTime().After(since) {
-		return errors.New("status worker did not publish a fresh page")
+	if err != nil {
+		return fmt.Errorf("status receipt inspection failed: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4<<20 {
+		return errors.New("status receipt is not a bounded regular file")
+	}
+	if !since.IsZero() && !info.ModTime().After(since) {
+		return fmt.Errorf("status receipt is stale: modified=%s required_after=%s", info.ModTime().Format(time.RFC3339Nano), since.Format(time.RFC3339Nano))
 	}
 	home, err := root.Stat(".")
 	if err != nil || info.Sys().(*syscall.Stat_t).Uid != home.Sys().(*syscall.Stat_t).Uid || info.Sys().(*syscall.Stat_t).Nlink != 1 {
-		return errors.New("status page ownership is invalid")
+		return errors.New("status receipt ownership is invalid")
 	}
 	file, err := root.Open(path)
 	if err != nil {
@@ -208,11 +216,21 @@ func acceptStatusPage(c service.Config, since time.Time) error {
 	defer file.Close()
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) {
-		return errors.New("status page changed during acceptance")
+		return errors.New("status receipt changed during acceptance")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, (4<<20)+1))
-	if err != nil || len(data) > 4<<20 || !strings.Contains(string(data), `class="status OK"`) {
-		return errors.New("fresh status page did not report OK")
+	var snapshot statuspage.Snapshot
+	if err != nil || len(data) > 4<<20 || json.Unmarshal(data, &snapshot) != nil || snapshot.State != "OK" || len(snapshot.Checks) == 0 || len(snapshot.Domains) == 0 {
+		return errors.New("status receipt did not contain healthy checks and domains")
+	}
+	// The old state format is sufficient for a read-only preflight. Activation
+	// always supplies a cutoff and requires a receipt from the new worker.
+	if since.IsZero() {
+		return nil
+	}
+	digest, err := hex.DecodeString(snapshot.HTMLSHA256)
+	if err != nil || len(digest) != 32 || snapshot.HTMLPath != c.Status.Output || snapshot.HTMLBytes <= 0 || snapshot.HTMLBytes > 4<<20 || !snapshot.Checked.After(since) || !snapshot.Published.After(since) {
+		return errors.New("status worker did not publish a fresh page receipt")
 	}
 	return nil
 }
@@ -304,6 +322,11 @@ func (d *Deployer) Consolidate(configPath string) (backup string, resultErr erro
 		return "", err
 	}
 	if d.preflightOnly {
+		if d.unifiedLayout == nil {
+			if err := acceptStatusReport(c, time.Time{}); err != nil {
+				return "", err
+			}
+		}
 		fmt.Fprintln(d.Out, "Unified candidate preflight accepted; installed services unchanged")
 		return "", nil
 	}
