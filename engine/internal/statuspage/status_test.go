@@ -134,6 +134,25 @@ func TestUnifiedObserverUsesTheSharedExecutable(t *testing.T) {
 	}
 }
 
+func TestFailureUsesExistingBoundedPrivateUserLog(t *testing.T) {
+	dir := t.TempDir()
+	state, log := filepath.Join(dir, "state"), filepath.Join(dir, "status.log")
+	if err := RecordFailure(state, log, errors.New("publish failed\n"+strings.Repeat("x", 10000))); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil || len(data) > 8192 || !strings.Contains(string(data), "state=ERROR") || strings.Count(string(data), "\n") != 1 {
+		t.Fatal(len(data), err)
+	}
+	info, err := os.Stat(log)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal(info, err)
+	}
+	if err := RecordFailure(state, state, errors.New("bad path")); err == nil {
+		t.Fatal("shared state and log accepted")
+	}
+}
+
 func TestStatusPolicyAndFallback(t *testing.T) {
 	for _, scenario := range []string{"healthy", "excluded", "drift", "private", "lookup-failure", "broken-policy", "fallback", "unblocked-down", "http-failure"} {
 		t.Run(scenario, func(t *testing.T) {

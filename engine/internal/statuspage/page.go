@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"network-owned-engine/internal/healthcheck"
 )
@@ -67,6 +68,24 @@ func atomicWrite(path string, data []byte) error {
 }
 
 const logLimit = 1 << 20
+
+// RecordFailure uses the existing user log when publication fails. The status
+// worker has no root-owned stdout/stderr files and must not need root to start.
+func RecordFailure(statePath, logPath string, cause error) error {
+	if !filepath.IsAbs(statePath) || !filepath.IsAbs(logPath) || statePath == logPath {
+		return errors.New("invalid status failure log paths")
+	}
+	release, err := healthcheck.LockState(statePath + ".lock")
+	if err != nil {
+		return err
+	}
+	defer release()
+	detail := strings.ReplaceAll(cause.Error(), "\n", " ")
+	if len(detail) > 4096 {
+		detail = detail[:4096]
+	}
+	return appendLog(logPath, fmt.Sprintf("%s state=ERROR details=%q\n", time.Now().Format("2006-01-02 15:04:05"), detail))
+}
 
 // appendLog bounds the program's own history to one file and three archives.
 // Unknown paths and oversized preexisting archives are preserved for review.

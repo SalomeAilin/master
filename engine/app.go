@@ -312,5 +312,8 @@ func statusCommand(ctx context.Context, args []string, unified bool) error {
 		}
 		return nil
 	}
-	return report.Publish(*output, *state, *log)
+	if err := report.Publish(*output, *state, *log); err != nil {
+		return errors.Join(err, statuspage.RecordFailure(*state, *log, err))
+	}
+	return nil
 }

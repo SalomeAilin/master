@@ -87,6 +87,13 @@ func TestDefinitionsUseOneProjectExecutableAndPreservePrivileges(t *testing.T) {
 		if job.Label == "com.local.network-split-log-guard" && (job.Definition["UserName"] != c.Status.User || job.Definition["StartInterval"] != 300) {
 			t.Fatal("status identity or cadence changed")
 		}
+		if job.Label == "com.local.network-split-log-guard" {
+			for _, key := range []string{"StandardOutPath", "StandardErrorPath"} {
+				if _, ok := job.Definition[key]; ok {
+					t.Fatal("status must use its own bounded user log", key)
+				}
+			}
+		}
 		if job.Label == "com.local.network-split-domestic-health" && job.Definition["StartInterval"] != 30 {
 			t.Fatal("health cadence changed")
 		}
@@ -330,12 +337,16 @@ func TestLaunchdAcceptsGeneratedDefinitions(t *testing.T) {
 	}
 	jobs := append(Jobs(testConfig(t)), Job{Definition: MainDefinition()})
 	for i, job := range jobs {
+		statusSpawn := os.Getuid() == 0 && job.Label == "com.local.network-split-log-guard"
 		label := fmt.Sprintf("com.local.network-split-test.%d.%d.%d", os.Getpid(), time.Now().UnixNano(), i)
 		job.Definition["Label"] = label
 		job.Definition["ProgramArguments"] = []string{"/usr/bin/true"}
 		job.Definition["RunAtLoad"], job.Definition["KeepAlive"] = false, false
-		for _, key := range []string{"UserName", "StartInterval", "EnvironmentVariables", "StandardOutPath", "StandardErrorPath"} {
+		for _, key := range []string{"StartInterval", "EnvironmentVariables", "StandardOutPath", "StandardErrorPath"} {
 			delete(job.Definition, key)
+		}
+		if !statusSpawn {
+			delete(job.Definition, "UserName")
 		}
 		data, err := Plist(job.Definition)
 		if err != nil {
@@ -351,6 +362,26 @@ func TestLaunchdAcceptsGeneratedDefinitions(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		out, err := exec.CommandContext(ctx, "/bin/launchctl", "bootstrap", domain, path).CombinedOutput()
 		cancel()
+		if err == nil && statusSpawn {
+			spawnCtx, spawnCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			out, err = exec.CommandContext(spawnCtx, "/bin/launchctl", "kickstart", domain+"/"+label).CombinedOutput()
+			spawnCancel()
+			if err == nil {
+				passed := false
+				for attempt := 0; attempt < 50; attempt++ {
+					details, e := exec.Command("/bin/launchctl", "print", domain+"/"+label).Output()
+					info := ParseLaunch(string(details))
+					if e == nil && info.State == "not running" && info.Exit == "0" {
+						passed = true
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+				if !passed {
+					err = errors.New("unprivileged status fixture did not exit successfully")
+				}
+			}
+		}
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		cleanupOut, cleanupErr := exec.CommandContext(cleanupCtx, "/bin/launchctl", "bootout", domain+"/"+label).CombinedOutput()
 		cleanupCancel()

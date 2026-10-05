@@ -158,6 +158,9 @@ func (d *Deployer) waitUnified(c service.Config, previous int64, started time.Ti
 					ready = false
 				}
 			default:
+				if info.State == "not running" && info.Exit != "" && info.Exit != "0" && info.Exit != "(never exited)" {
+					return fmt.Errorf("worker %s failed: exit %s", job.Label, info.Exit)
+				}
 				if info.State != "not running" || info.Exit != "0" {
 					ready = false
 				}
@@ -494,7 +497,7 @@ func (d *Deployer) extendUnifiedLogs(backup, path string) error {
 		return err
 	}
 	text := string(data)
-	for _, name := range []string{"network-split-service.log", "network-split-service.out", "network-split-service.err", "network-split-status.out", "network-split-status.err", "china-route.out", "china-route.err"} {
+	for _, name := range []string{"network-split-service.log", "network-split-service.out", "network-split-service.err", "china-route.out", "china-route.err"} {
 		full := "/var/log/" + name
 		present := false
 		for _, line := range strings.Split(text, "\n") {

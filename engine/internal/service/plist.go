@@ -42,8 +42,8 @@ func Jobs(c Config) []Job {
 	dns := Job{Label: "homebrew.mxcl.dnsmasq", Definition: map[string]any{"Label": "homebrew.mxcl.dnsmasq", "RunAtLoad": true, "KeepAlive": true,
 		"ProgramArguments": []string{c.Routes.DNSBinary, "--keep-in-foreground", "-C", c.Routes.DNSConfig}}}
 	status := Job{Label: "com.local.network-split-log-guard", Definition: map[string]any{"Label": "com.local.network-split-log-guard", "UserName": c.Status.User, "RunAtLoad": true, "StartInterval": 300, "ExitTimeOut": 15,
-		"EnvironmentVariables": map[string]any{"HOME": c.Status.Home}, "StandardOutPath": "/var/log/network-split-status.out", "StandardErrorPath": "/var/log/network-split-status.err",
-		"ProgramArguments": []string{Binary, "worker", "status", "-output", c.Status.Output, "-state", c.Status.State, "-log", c.Status.Log}}}
+		"EnvironmentVariables": map[string]any{"HOME": c.Status.Home},
+		"ProgramArguments":     []string{Binary, "worker", "status", "-output", c.Status.Output, "-state", c.Status.State, "-log", c.Status.Log}}}
 	return []Job{dns, proxy, worker("com.local.network-split-dns-event-route-agent", "observe", "/var/log/network-split-dns-event-route-agent", 0, true),
 		worker("com.local.china-route", "routes", "/var/log/china-route", 0, map[string]any{"NetworkState": true}),
 		worker("com.local.network-split-guard", "guard", "/var/log/network-split-guard", 30, map[string]any{"NetworkState": true}),

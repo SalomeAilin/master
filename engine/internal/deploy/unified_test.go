@@ -357,3 +357,30 @@ func TestUnifiedBootstrapRetriesOnlyKnownUnloadRace(t *testing.T) {
 		}
 	}
 }
+
+func TestUnifiedAcceptanceImmediatelyReportsAWorkerStartupFailure(t *testing.T) {
+	d, f := unifiedSetup(t)
+	d.acceptUnified = nil
+	d.Sleep = func(time.Duration) { t.Fatal("known startup failure was retried") }
+	d.Run = func(args ...string) (string, error) {
+		for _, job := range d.unifiedJobs(f.config) {
+			if args[2] != job.Domain+"/"+job.Label {
+				continue
+			}
+			state, exit, pid := "not running", "0", 0
+			if job.Label == "homebrew.mxcl.dnsmasq" || job.Label == "com.local.network-domain-proxy" || job.Label == "com.local.network-split-dns-event-route-agent" {
+				state, pid = "running", 123
+			}
+			if job.Label == "com.local.network-split-log-guard" {
+				exit = "78: EX_CONFIG"
+			}
+			return fmt.Sprintf("path = %s\nprogram = %s\nstate = %s\npid = %d\nlast exit code = %s\n", job.Path, job.Program, state, pid, exit), nil
+		}
+		t.Fatal("unexpected operation", args)
+		return "", nil
+	}
+	err := d.waitUnified(f.config, 0, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "78: EX_CONFIG") {
+		t.Fatal(err)
+	}
+}
