@@ -94,16 +94,20 @@ sudo "$STAGE/network-domain-engine" upgrade -native-dns
 
 ## 维护命令
 
+`0.3.1-native-dns` 的备份识别修复已通过测试，尚未替换线上 `0.3.0-native-dns`。指定的旧软件回滚包已用候选版安全清理，常驻服务 PID 和安装文件哈希未变；下面的未识别项提示及旧软件包支持需更新到 `0.3.1` 才会出现在已安装命令中。
+
 `network-domain-engine maintenance --help` 显示现有动作：
 
 | 动作 | 边界 |
 | --- | --- |
-| `backups`、`inspect-backup <exact-path>` | 检查已识别备份，不删除 |
+| `backups`、`inspect-backup <exact-path>` | 检查备份；清单列出已识别格式及未识别的备份类名称，不删除 |
 | `remove-backup <exact-path>` | 仅删除明确指定且已确认可舍弃的一份；核对内容、占用、PID 和安装哈希 |
 | `residues`、`cleanup-residues` | 检查或回收已知状态残留，保留未知内容与非空旧状态 |
 | `enable`、`rollback` | 设置或恢复系统代理；`rollback` 不是版本回退 |
 
 维护共用部署锁。健康任务的自动回收只处理已知临时写入，并保留五分钟宽限期；不会清理私人归档。验收备份保留为恢复途径，删除前须明确确认。
+
+备份清单的范围是 `/var/db`，不是全机历史文件清单；不会扫描 `/usr/local/etc` 的手工 `.bak`、旧日志或 Homebrew。已支持旧 `network-software-update.*` 回滚包的固定文件结构，严格限制子目录、文件大小和链接；未识别名称标为 `unrecognized`，不能删除。旧软件包仅在统一程序和内置 DNS 已运行时允许清理，并核对文件占用、内容哈希及运行状态。
 
 `config [flags] output.json` 仅按仓库策略生成新的代理配置，不覆盖已有文件，也不会安装。可选 SSH 工具仍是 [deploy-remote-access.zsh](scripts/deploy-remote-access.zsh)，不属于网络后台；其安装、卸载必须另行授权，模板存在不代表远程登录可用。
 

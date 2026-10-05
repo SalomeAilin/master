@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -336,5 +337,190 @@ func TestBackupInventoryCanListProtectedMacOSParent(t *testing.T) {
 	// Names only: do not inspect or modify any production backup or database.
 	if _, err := backupDirectoryNames(parent); err != nil {
 		t.Fatal("system directory enumeration requires unrelated metadata access", err)
+	}
+}
+
+func softwareMaintenanceFixture(t *testing.T) *Deployer {
+	t.Helper()
+	d := maintenanceFixture(t)
+	d.NativeDNS = true
+	d.Tool = d.Binary
+	d.ServiceConfig = filepath.Join(filepath.Dir(d.Config), "service.json")
+	d.SupervisorPlist = filepath.Join(filepath.Dir(d.Plist), "parent.plist")
+	for _, path := range []string{d.ServiceConfig, d.SupervisorPlist} {
+		writeTestFile(t, path, "native fixture")
+	}
+	for _, name := range []string{"com.local.network-split-dns", "com.local.china-route", "com.local.network-split-guard", "com.local.network-split-log-guard"} {
+		writeTestFile(t, filepath.Join(filepath.Dir(d.Plist), name+".plist"), "native worker fixture")
+	}
+	original := d.Run
+	d.Run = func(args ...string) (string, error) {
+		if args[0] == "/bin/launchctl" {
+			if len(args) != 3 || args[1] != "print" || !slices.Contains([]string{Label, "system/com.local.network-split-service", "system/com.local.network-split-dns", "system/com.local.network-split-dns-event-route-agent"}, args[2]) {
+				t.Fatal("unexpected runtime operation", args)
+			}
+			return fmt.Sprintf("state = running\nprogram = %s\npid = 123\n", d.Binary), nil
+		}
+		return original(args...)
+	}
+	return d
+}
+
+func makeSoftwareBackup(t *testing.T, d *Deployer) string {
+	t.Helper()
+	path, err := os.MkdirTemp(d.BackupParent, softwarePrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(path, legacySoftwareArchive), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"previous-dnsmasq", "previous-sing-box", legacySoftwareArchive + "/LICENSE", legacySoftwareArchive + "/sing-box"} {
+		writeTestFile(t, filepath.Join(path, name), "retired software fixture")
+	}
+	return path
+}
+
+func TestSoftwareBackupInspectionAndExactRemoval(t *testing.T) {
+	d := softwareMaintenanceFixture(t)
+	path := makeSoftwareBackup(t, d)
+	other := makeBackup(t, d, "installation")
+	before, err := d.maintenanceState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := d.InspectBackup(path)
+	if err != nil || b.Kind != "software-update" || len(b.Files) != 4 || !slices.Equal(b.Directories, []string{legacySoftwareArchive}) {
+		t.Fatal(b, err)
+	}
+	listed, err := d.Backups()
+	if err != nil || len(listed) != 2 {
+		t.Fatal(listed, err)
+	}
+	if err := d.RemoveBackup(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("backup remains", err)
+	}
+	if _, err := d.InspectBackup(other); err != nil {
+		t.Fatal("other backup changed", err)
+	}
+	after, err := d.maintenanceState()
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("runtime changed", err)
+	}
+}
+
+func TestSoftwareBackupRejectsUnknownUnsafeAndBusyContents(t *testing.T) {
+	for _, variant := range []string{"extra-file", "extra-release-file", "missing-file", "release-link", "release-writable", "file-link", "file-hardlink", "file-writable", "oversized-file", "empty-file", "busy", "changed-file", "legacy-runtime"} {
+		t.Run(variant, func(t *testing.T) {
+			d := softwareMaintenanceFixture(t)
+			path := makeSoftwareBackup(t, d)
+			release := filepath.Join(path, legacySoftwareArchive)
+			file := filepath.Join(release, "sing-box")
+			switch variant {
+			case "extra-file":
+				writeTestFile(t, filepath.Join(path, "keep.txt"), "keep")
+			case "extra-release-file":
+				writeTestFile(t, filepath.Join(release, "keep.txt"), "keep")
+			case "missing-file":
+				os.Remove(filepath.Join(path, "previous-dnsmasq"))
+			case "release-link":
+				outside := filepath.Join(t.TempDir(), "release")
+				if err := os.Rename(release, outside); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, release); err != nil {
+					t.Fatal(err)
+				}
+			case "release-writable":
+				os.Chmod(release, 0o777)
+			case "file-link", "file-hardlink":
+				os.Remove(file)
+				var err error
+				if variant == "file-link" {
+					err = os.Symlink(d.Binary, file)
+				} else {
+					err = os.Link(d.Binary, file)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "file-writable":
+				os.Chmod(file, 0o666)
+			case "oversized-file":
+				os.Truncate(file, (128<<20)+1)
+			case "empty-file":
+				os.Truncate(file, 0)
+			case "legacy-runtime":
+				d.NativeDNS = false
+			case "busy", "changed-file":
+				original := d.Run
+				d.Run = func(args ...string) (string, error) {
+					if args[0] == "/usr/sbin/lsof" {
+						if variant == "busy" {
+							return "123\n", nil
+						}
+						writeTestFile(t, file, "changed")
+					}
+					return original(args...)
+				}
+			}
+			if err := d.RemoveBackup(path); err == nil {
+				t.Fatal("unsafe removal accepted")
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatal("backup removed", err)
+			}
+		})
+	}
+}
+
+func TestSoftwareBackupUsesAScopedLargerHashLimit(t *testing.T) {
+	d := softwareMaintenanceFixture(t)
+	path := makeSoftwareBackup(t, d)
+	file := filepath.Join(path, "previous-sing-box")
+	if err := os.Truncate(file, (64<<20)+1); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := d.InspectBackup(path); err != nil || b.Bytes <= 64<<20 {
+		t.Fatal(b, err)
+	}
+	f, err := os.Open(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, _, err := hashFile(f); err == nil {
+		t.Fatal("normal maintenance hash limit was weakened")
+	}
+}
+
+func TestInventoryReportsUnrecognizedBackupNamesWithoutReadingOrDeleting(t *testing.T) {
+	d := maintenanceFixture(t)
+	for _, name := range []string{"network-unified-backup.bad!", "network-unknown-backup.ABCDEF", "network-software-update.short", "network-split-backups"} {
+		if err := os.Mkdir(filepath.Join(d.BackupParent, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.RemoveBackup(name); err == nil {
+			t.Fatal("unrecognized backup removable", name)
+		}
+	}
+	writeTestFile(t, filepath.Join(d.BackupParent, "network-split-domestic-health.state"), "active")
+	if err := os.Symlink(t.TempDir(), filepath.Join(d.BackupParent, "network-unknown-backup.link")); err != nil {
+		t.Fatal(err)
+	}
+	list, err := d.Backups()
+	if err != nil || len(list) != 5 {
+		t.Fatal(list, err)
+	}
+	for _, backup := range list {
+		if backup.Kind != "unrecognized" || backup.Error == "" || len(backup.Files) != 0 {
+			t.Fatal(backup)
+		}
+		if _, err := os.Stat(backup.Path); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

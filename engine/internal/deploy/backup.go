@@ -2,6 +2,8 @@ package deploy
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,8 @@ import (
 const acceptancePrefix = "network-domain-independent-backup."
 const installationPrefix = "network-split-backup."
 const unifiedPrefix = "network-unified-backup."
+const softwarePrefix = "network-software-update."
+const legacySoftwareArchive = "sing-box-1.14.2-darwin-arm64"
 
 var installationFiles = []string{
 	"china-route.sh", "network-split-guard.sh", "network-split-policy",
@@ -32,13 +36,14 @@ var installationFiles = []string{
 	"network-split-guard.before-log-fix.sh",
 }
 
-// Backup describes recognized contents, not permission to discard a recovery copy.
+// Backup records a candidate and any validated contents, not permission to discard it.
 type Backup struct {
-	Path  string            `json:"path"`
-	Kind  string            `json:"kind"`
-	Bytes int64             `json:"bytes"`
-	Files map[string]string `json:"files_sha256"`
-	Error string            `json:"error,omitempty"`
+	Path        string            `json:"path"`
+	Kind        string            `json:"kind"`
+	Bytes       int64             `json:"bytes"`
+	Files       map[string]string `json:"files_sha256"`
+	Directories []string          `json:"directories,omitempty"`
+	Error       string            `json:"error,omitempty"`
 }
 
 func (d *Deployer) snapshotTargets() []string {
@@ -57,7 +62,7 @@ func (d *Deployer) snapshotTargets() []string {
 }
 
 func backupKind(name string) string {
-	for prefix, kind := range map[string]string{acceptancePrefix: "acceptance", installationPrefix: "installation", unifiedPrefix: "unified"} {
+	for prefix, kind := range map[string]string{acceptancePrefix: "acceptance", installationPrefix: "installation", unifiedPrefix: "unified", softwarePrefix: "software-update"} {
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
@@ -113,6 +118,10 @@ func (d *Deployer) inspectBackup(parent *os.Root, name string) (Backup, fs.FileI
 	opened, err := root.Stat(".")
 	if err != nil || !os.SameFile(info, opened) {
 		return result, nil, errors.New("backup changed while opening")
+	}
+	if result.Kind == "software-update" {
+		result, err = inspectSoftwareBackup(root, result)
+		return result, info, err
 	}
 	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
@@ -244,7 +253,83 @@ func (d *Deployer) inspectBackup(parent *os.Root, name string) (Backup, fs.FileI
 
 func hashFile(file *os.File) (string, int64, error) { return runtimecheck.HashFile(file) }
 
-// Backups lists metadata only. Invalid candidates are reported without deletion.
+// This retired updater had one release directory and two previous binaries.
+// Keep the recognized layout narrow; arbitrary nested backups are not removable.
+func inspectSoftwareBackup(root *os.Root, result Backup) (Backup, error) {
+	names, err := runtimecheck.DirectoryNames(root)
+	want := []string{"previous-dnsmasq", "previous-sing-box", legacySoftwareArchive}
+	if err != nil || !slices.Equal(names, want) {
+		return result, errors.New("software backup must contain exactly the known previous binaries and release directory")
+	}
+	info, err := root.Lstat(legacySoftwareArchive)
+	if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
+		return result, errors.New("software backup release directory is unsafe")
+	}
+	release, err := root.OpenRoot(legacySoftwareArchive)
+	if err != nil {
+		return result, err
+	}
+	defer release.Close()
+	opened, err := release.Stat(".")
+	if err != nil || !os.SameFile(info, opened) {
+		return result, errors.New("software backup release directory changed")
+	}
+	names, err = runtimecheck.DirectoryNames(release)
+	if err != nil || !slices.Equal(names, []string{"LICENSE", "sing-box"}) {
+		return result, errors.New("unexpected software backup release contents")
+	}
+	for _, entry := range []struct {
+		root      *os.Root
+		name, key string
+		limit     int64
+	}{
+		{root, "previous-dnsmasq", "previous-dnsmasq", 16 << 20},
+		{root, "previous-sing-box", "previous-sing-box", 128 << 20},
+		{release, "LICENSE", legacySoftwareArchive + "/LICENSE", 64 << 10},
+		{release, "sing-box", legacySoftwareArchive + "/sing-box", 128 << 20},
+	} {
+		digest, size, err := hashSoftwareFile(entry.root, entry.name, entry.limit)
+		if err != nil {
+			return result, err
+		}
+		result.Files[entry.key] = digest
+		result.Bytes += size
+		if result.Bytes > 256<<20 {
+			return result, errors.New("software backup exceeds total size limit")
+		}
+	}
+	result.Directories = []string{legacySoftwareArchive}
+	return result, nil
+}
+
+func hashSoftwareFile(root *os.Root, name string, limit int64) (string, int64, error) {
+	info, err := root.Lstat(name)
+	if err != nil {
+		return "", 0, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Sys().(*syscall.Stat_t).Nlink != 1 || info.Size() <= 0 || info.Size() > limit {
+		return "", 0, fmt.Errorf("unsafe or oversized software backup file: %s", name)
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return "", 0, errors.New("software backup file changed while opening")
+	}
+	hash := sha256.New()
+	size, err := io.Copy(hash, io.LimitReader(file, limit+1))
+	after, statErr := file.Stat()
+	if err != nil || statErr != nil || size != info.Size() || size > limit || after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
+		return "", 0, errors.New("software backup changed during hashing")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), size, nil
+}
+
+// Backups inspects known layouts and reports unknown backup-like names in the
+// backup parent. It neither scans other directories nor authorizes deletion.
 func (d *Deployer) Backups() ([]Backup, error) {
 	parent, err := d.backupParent()
 	if err != nil {
@@ -258,6 +343,9 @@ func (d *Deployer) Backups() ([]Backup, error) {
 	result := []Backup{}
 	for _, name := range names {
 		if backupKind(name) == "" {
+			if strings.HasPrefix(name, "network-") && (strings.Contains(name, "backup") || strings.Contains(name, "software-update")) {
+				result = append(result, Backup{Path: filepath.Join(d.BackupParent, name), Kind: "unrecognized", Error: "unrecognized backup candidate; contents not inspected and deletion not permitted"})
+			}
 			continue
 		}
 		backup, _, err := d.inspectBackup(parent, name)
@@ -309,6 +397,9 @@ func (d *Deployer) RemoveBackup(path string) error {
 	if err != nil {
 		return err
 	}
+	if backup.Kind == "software-update" && (!d.NativeDNS || d.Tool != d.Binary) {
+		return errors.New("software backup removal requires the unified program with native DNS")
+	}
 	before, err := d.maintenanceState()
 	if err != nil {
 		return err
@@ -334,8 +425,8 @@ func (d *Deployer) RemoveBackup(path string) error {
 	if err := d.checkInterrupted(); err != nil {
 		return err
 	}
-	// Remove validated flat contents through a directory handle. Unexpected new
-	// entries make the final directory removal fail instead of expanding deletion.
+	// Remove only validated files through directory handles. Unexpected entries
+	// make directory removal fail instead of expanding deletion recursively.
 	root, err := parent.OpenRoot(name)
 	if err != nil {
 		return err
@@ -345,7 +436,28 @@ func (d *Deployer) RemoveBackup(path string) error {
 	if err != nil || !os.SameFile(identity, opened) {
 		return errors.New("backup directory replaced before removal")
 	}
+	for _, directory := range backup.Directories {
+		sub, err := root.OpenRoot(directory)
+		if err != nil {
+			return err
+		}
+		for _, file := range orderedKeys(backup.Files, nil) {
+			if name, ok := strings.CutPrefix(file, directory+"/"); ok {
+				if err := sub.Remove(name); err != nil {
+					sub.Close()
+					return fmt.Errorf("backup removal incomplete at %s: %w", backup.Path, err)
+				}
+			}
+		}
+		sub.Close()
+		if err := root.Remove(directory); err != nil {
+			return fmt.Errorf("backup removal incomplete at %s: %w", backup.Path, err)
+		}
+	}
 	for _, file := range orderedKeys(backup.Files, nil) {
+		if strings.Contains(file, "/") {
+			continue
+		}
 		if err := root.Remove(file); err != nil {
 			return fmt.Errorf("backup removal incomplete at %s: %w", backup.Path, err)
 		}
