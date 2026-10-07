@@ -37,9 +37,25 @@ func fixture(t *testing.T, scenario string) *Collector {
 	if scenario == "broken-policy" {
 		os.Remove(filepath.Join(dir, "china_ip_list.txt"))
 	}
+	if scenario == "fallback-baseline-failure" {
+		os.WriteFile(filepath.Join(dir, "dnsmasq-network-split.conf"), []byte("listen-address=127.0.0.1,192.0.2.10\nno-resolv\nfilter-AAAA\ndomain-needed\nbogus-priv\ndns-loop-detect\nlocal-service\n"), 0o600)
+	}
+	// The negative probe goes to a foreign upstream. While Wi-Fi is down that
+	// upstream is unreachable and the local listener answers SERVFAIL.
+	servfail := &net.DNSError{Err: "server misbehaving", IsTemporary: true}
+	foreignDNSDown := map[string]bool{"fallback-blocked-dns": true, "fallback-control-failure": true, "fallback-baseline-failure": true, "unblocked-down-dns": true, "foreign-dns-failure": true}
 	c.Lookup = func(_ context.Context, name string) ([]netip.Addr, error) {
 		if strings.HasSuffix(name, ".invalid.") {
+			if scenario == "fallback-dns-hijack" {
+				return []netip.Addr{netip.MustParseAddr("198.51.100.7")}, nil
+			}
+			if foreignDNSDown[scenario] {
+				return nil, servfail
+			}
 			return nil, &net.DNSError{IsNotFound: true}
+		}
+		if name == "baidu.com" && scenario == "fallback-control-failure" {
+			return nil, servfail
 		}
 		ip := "9.9.9.9"
 		if name == "domestic.test" || name == "baidu.com" {
@@ -59,6 +75,8 @@ func fixture(t *testing.T, scenario string) *Collector {
 	}
 	wired := "gateway: 192.0.2.1\ninterface: wired-test\nflags: <UP,GATEWAY>\n"
 	wifi := "gateway: 198.51.100.1\ninterface: wifi-test\nflags: <UP,GATEWAY>\n"
+	fallback := strings.HasPrefix(scenario, "fallback")
+	wifiDown := fallback || strings.HasPrefix(scenario, "unblocked-down")
 	c.Run = func(_ context.Context, args ...string) (string, error) {
 		switch args[0] {
 		case "/sbin/route":
@@ -70,12 +88,12 @@ func fixture(t *testing.T, scenario string) *Collector {
 				if args[4] == "wired-test" {
 					return wired, nil
 				}
-				if scenario == "fallback" || scenario == "unblocked-down" {
+				if wifiDown {
 					return "", errors.New("down")
 				}
 				return wifi, nil
 			}
-			if scenario == "fallback" {
+			if fallback {
 				if target == "1.1.1.1" || target == "208.67.222.222" {
 					return "gateway: 127.0.0.1\ninterface: lo0\nflags: <UP,REJECT>\n", nil
 				}
@@ -115,7 +133,7 @@ func fixture(t *testing.T, scenario string) *Collector {
 		if iface != "wifi-test" {
 			t.Fatal("wrong interface", iface)
 		}
-		if scenario == "fallback" {
+		if fallback {
 			t.Fatal("foreign HTTP during fallback")
 		}
 		return "HTTP 204; 1 ms; interface=wifi-test", scenario != "http-failure"
@@ -220,6 +238,31 @@ func TestStatusPolicyAndFallback(t *testing.T) {
 			}
 			if scenario == "excluded" && r.Domains[0].State != "policy-excluded" {
 				t.Fatal(r.Domains)
+			}
+		})
+	}
+}
+
+// Only a verified fallback, with the local listener still answering domestic
+// names, may excuse a failed negative probe. Every other case keeps alarming.
+func TestNegativeDNSIsBlockedOnlyInVerifiedFallback(t *testing.T) {
+	for scenario, want := range map[string]struct{ state, negative, alsoBad string }{
+		"fallback-blocked-dns":      {"FALLBACK", "blocked", ""},
+		"fallback":                  {"FALLBACK", "ok", ""},
+		"fallback-dns-hijack":       {"BAD", "bad", ""},
+		"fallback-control-failure":  {"BAD", "bad", "baidu.com"},
+		"fallback-baseline-failure": {"BAD", "blocked", "dns-security-baseline"},
+		"unblocked-down-dns":        {"BAD", "bad", "foreign-route"},
+		"foreign-dns-failure":       {"BAD", "bad", ""},
+	} {
+		t.Run(scenario, func(t *testing.T) {
+			r := fixture(t, scenario).Collect(context.Background())
+			states := map[string]string{}
+			for _, check := range r.Checks {
+				states[check.Name] = check.State
+			}
+			if r.State != want.state || states["negative-dns"] != want.negative || want.alsoBad != "" && states[want.alsoBad] != "bad" {
+				t.Fatalf("state %s, want %+v: %+v", r.State, want, r.Checks)
 			}
 		})
 	}

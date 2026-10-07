@@ -318,7 +318,16 @@ func (c *Collector) Collect(ctx context.Context) Report {
 	ips, err := lookup(child, probeName)
 	cancel()
 	var dnsErr *net.DNSError
-	add("negative-dns", "reserved nonexistent name", randomErr == nil && len(ips) == 0 && errors.As(err, &dnsErr) && dnsErr.IsNotFound)
+	switch {
+	case randomErr == nil && len(ips) == 0 && errors.As(err, &dnsErr) && dnsErr.IsNotFound:
+		add("negative-dns", "reserved nonexistent name", true)
+	case fallback && randomErr == nil && len(ips) == 0 && err != nil && len(resolve("baidu.com")) > 0:
+		// The probe needs a foreign upstream, which the verified fallback block
+		// cuts off. A domestic answer shows the local listener still works.
+		r.Checks = append(r.Checks, Row{Name: "negative-dns", State: "blocked", Detail: "Wi-Fi unavailable; foreign DNS blocked"})
+	default:
+		add("negative-dns", "reserved nonexistent name", false)
+	}
 	addressPolicy := policy.New(filepath.Join(c.Etc, "china_ip_list.txt"), filepath.Join(c.Etc, "domestic_extra_routes.txt"))
 	policyOK := addressPolicy.Allowed("223.5.5.5")
 	add("address-policy", "domestic resolver control", policyOK)
