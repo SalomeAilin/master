@@ -86,9 +86,77 @@ func TestPolicyPrecedenceAndMixedAnswers(t *testing.T) {
 	e.domestic = func(context.Context, string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("1.1.1.1"), netip.MustParseAddr("223.5.5.5")}, nil
 	}
+	e.foreign = func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("1.0.0.1")}, nil
+	}
 	p, err := e.resolve(context.Background(), "unknown.test:443")
-	if err != nil || p.kind != "foreign" || len(p.ips) != 1 || p.ips[0].String() != "1.1.1.1" {
+	if err != nil || p.kind != "foreign" || len(p.ips) != 1 || p.ips[0].String() != "1.0.0.1" {
 		t.Fatalf("%+v %v", p, err)
+	}
+}
+
+func TestUnknownForeignUsesForeignDNS(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		answers   []string
+		lookupErr error
+		wantError bool
+	}{
+		{name: "fresh-answer", answers: []string{"1.0.0.1"}},
+		{name: "domestic-cdn-stays-foreign", answers: []string{"223.5.5.5"}},
+		{name: "unavailable", lookupErr: fmt.Errorf("Wi-Fi DNS unavailable"), wantError: true},
+		{name: "empty", wantError: true},
+		{name: "private-answer", answers: []string{"1.0.0.1", "127.0.0.1"}, wantError: true},
+		{name: "unsupported-answer", answers: []string{"2606:4700:4700::1111"}, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			e := fixtureEngine(t)
+			var queries []string
+			e.domestic = func(context.Context, string) ([]netip.Addr, error) {
+				queries = append(queries, "domestic")
+				return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+			}
+			e.foreign = func(context.Context, string) ([]netip.Addr, error) {
+				queries = append(queries, "foreign")
+				var answers []netip.Addr
+				for _, value := range test.answers {
+					answers = append(answers, netip.MustParseAddr(value))
+				}
+				return answers, test.lookupErr
+			}
+			p, err := e.resolve(context.Background(), "unlisted.test:443")
+			if strings.Join(queries, ",") != "domestic,foreign" {
+				t.Fatalf("foreign destination reused domestic DNS: queries=%v plan=%+v", queries, p)
+			}
+			if (err != nil) != test.wantError {
+				t.Fatalf("plan=%+v error=%v", p, err)
+			}
+			if !test.wantError && (p.kind != "foreign" || p.iface != e.config.Foreign.Interface ||
+				len(p.ips) != 1 || p.ips[0].String() != test.answers[0]) {
+				t.Fatalf("unexpected refreshed plan: %+v", p)
+			}
+		})
+	}
+}
+
+func TestUnknownDomesticAndLiteralsDoNotNeedForeignDNS(t *testing.T) {
+	e := fixtureEngine(t)
+	e.domestic = func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("223.5.5.5")}, nil
+	}
+	e.foreign = func(context.Context, string) ([]netip.Addr, error) {
+		t.Fatal("domestic domain or IP literal queried foreign DNS")
+		return nil, nil
+	}
+	for _, test := range []struct{ target, kind string }{
+		{"unlisted.test:443", "domestic"},
+		{"223.5.5.5:443", "domestic"},
+		{"1.1.1.1:443", "foreign"},
+	} {
+		p, err := e.resolve(context.Background(), test.target)
+		if err != nil || p.kind != test.kind {
+			t.Fatalf("%s: plan=%+v error=%v", test.target, p, err)
+		}
 	}
 }
 
@@ -105,6 +173,7 @@ func TestIPGroupingUsesOneHotUpdateSnapshot(t *testing.T) {
 	e.domestic = func(context.Context, string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("1.1.1.1")}, nil
 	}
+	e.foreign = e.domestic
 	var updates sync.WaitGroup
 	updates.Add(1)
 	defer updates.Wait()

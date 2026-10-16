@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -263,10 +264,13 @@ func TestIntegrationAutomaticClassificationHotUpdatesAndCachedRestart(t *testing
 		"listed-cn.test": {"1.1.1.1"}, "listed-foreign.test": {"223.5.5.5"},
 		"unknown-cn.test": {"223.5.5.5"}, "unknown-foreign.test": {"1.1.1.1"},
 		"updated-cn.test": {"1.1.1.1"}, "private-rebind.test": {"127.0.0.1"},
+		"foreign-rebind.test": {"1.1.1.1"},
 	}
+	foreignNames := maps.Clone(names)
+	foreignNames["foreign-rebind.test"] = []string{"127.0.0.1"}
 	// Missing interfaces expose the chosen outbound without sending traffic.
 	c.Domestic = proxyconfig.Egress{Interface: "en998", DNS: proxyconfig.DNS{Hosts: names}}
-	c.Foreign = proxyconfig.Egress{Interface: "en999", DNS: proxyconfig.DNS{Hosts: names}}
+	c.Foreign = proxyconfig.Egress{Interface: "en999", DNS: proxyconfig.DNS{Hosts: foreignNames}}
 	for i, source := range c.RuleSources {
 		os.WriteFile(source.Seed, rules.body[source.Kind], 0o600)
 		c.RuleSources[i].URL, c.RuleSources[i].Interval = server.URL+"/"+source.Kind, "500ms"
@@ -304,19 +308,21 @@ func TestIntegrationAutomaticClassificationHotUpdatesAndCachedRestart(t *testing
 			{"unknown-cn.test", "domestic"}, {"unknown-foreign.test", "foreign"}} {
 			check(test[0], test[1])
 		}
-		start := events.size()
-		port := connectThrough(t, c.Listen, "private-rebind.test")
-		waitFor(t, "private answer rejection", func() bool {
-			for _, event := range events.request(start, port) {
-				if event["event"] == "rejected" {
-					return true
+		for _, name := range []string{"private-rebind.test", "foreign-rebind.test"} {
+			start := events.size()
+			port := connectThrough(t, c.Listen, name)
+			waitFor(t, "private answer rejection: "+name, func() bool {
+				for _, event := range events.request(start, port) {
+					if event["event"] == "rejected" {
+						return true
+					}
 				}
-			}
-			return false
-		})
-		for _, event := range events.request(start, port) {
-			if event["event"] == "route" {
-				t.Fatal("private DNS answer reached an outbound dial")
+				return false
+			})
+			for _, event := range events.request(start, port) {
+				if event["event"] == "route" {
+					t.Fatal("private DNS answer reached an outbound dial", name)
+				}
 			}
 		}
 		if cached {

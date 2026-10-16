@@ -85,7 +85,8 @@ func (e *engine) resolve(ctx context.Context, address string) (plan, error) {
 	if err != nil {
 		return p, err
 	}
-	if ip, err := netip.ParseAddr(p.host); err == nil {
+	ip, literalErr := netip.ParseAddr(p.host)
+	if literalErr == nil {
 		p.ips = []netip.Addr{ip}
 	} else {
 		p.kind = e.rules.domain(p.host)
@@ -98,13 +99,8 @@ func (e *engine) resolve(ctx context.Context, address string) (plan, error) {
 			return p, err
 		}
 	}
-	if len(p.ips) == 0 {
-		return p, errors.New("no IPv4 DNS answers")
-	}
-	for _, ip := range p.ips {
-		if !publicIP(ip) {
-			return p, errors.New("private or unsupported DNS destination rejected")
-		}
+	if err := validateDestinationIPs(p.ips); err != nil {
+		return p, err
 	}
 	if p.kind == "" {
 		// Group all answers against one rule snapshot, including during hot updates.
@@ -114,12 +110,35 @@ func (e *engine) resolve(ctx context.Context, address string) (plan, error) {
 			p.kind = "domestic"
 		}
 		p.ips = eligible
+		if !china && literalErr != nil {
+			// Domestic DNS only selected the outbound. Resolve again on that
+			// outbound so a foreign connection never reuses its possibly bad answer.
+			p.ips, err = e.foreign(ctx, p.host)
+			if err != nil {
+				return p, err
+			}
+			if err := validateDestinationIPs(p.ips); err != nil {
+				return p, err
+			}
+		}
 	}
 	p.iface = e.config.Foreign.Interface
 	if p.kind == "domestic" {
 		p.iface = e.config.Domestic.Interface
 	}
 	return p, nil
+}
+
+func validateDestinationIPs(ips []netip.Addr) error {
+	if len(ips) == 0 {
+		return errors.New("no IPv4 DNS answers")
+	}
+	for _, ip := range ips {
+		if !publicIP(ip) {
+			return errors.New("private or unsupported DNS destination rejected")
+		}
+	}
+	return nil
 }
 
 const (
