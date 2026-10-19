@@ -132,18 +132,23 @@ func TestWiredPFLive(t *testing.T) {
 	t.Logf("live test owns GID %d, anchor %s; token/hash are durably recorded in %s/session.json", gid, Anchor, Directory)
 
 	for _, network := range []string{"tcp4", "tcp6", "udp4", "udp6"} {
-		if err = h.blockedNonce(ctx, network); err != nil {
-			t.Fatalf("%s barrier check: %v", network, err)
-		}
-		t.Logf("%s: root control echoed, controlled nonce absent, deny packet/byte counters increased, control still echoed", network)
+		t.Run(network, func(t *testing.T) {
+			if err := h.blockedNonce(ctx, network); err != nil {
+				t.Error(err)
+				return
+			}
+			t.Log("root control echoed before and after; controlled nonce absent; deny packet/byte counters increased")
+		})
 	}
 	if err = h.listenerIdentity(ctx); err != nil {
-		t.Fatal(err)
+		t.Error(err)
 	}
 	if err = n.Verify(ctx, h.state); err != nil {
-		t.Fatal(err)
+		t.Error(err)
 	}
-	t.Log("local PF capability gate passed; physical Ethernet removal and real Baidu transfer remain separate acceptance checks")
+	if !t.Failed() {
+		t.Log("local PF capability gate passed; physical Ethernet removal and real Baidu transfer remain separate acceptance checks")
+	}
 }
 
 type livePFHarness struct {
@@ -558,20 +563,17 @@ func (h *livePFHarness) blockedNonce(ctx context.Context, network string) error 
 	if err = child.stop(ctx); err != nil {
 		return err
 	}
-	if response.Connected && strings.HasPrefix(network, "tcp") || response.Echo {
-		return errors.New("controlled connection was delivered")
-	}
 	if err = liveExchange(control, liveNonce()); err != nil {
 		return fmt.Errorf("control echo failed after the blocked attempt: %w", err)
 	}
-	for _, seen := range echo.status().Seen {
-		if seen == nonce {
-			return errors.New("listener received the controlled nonce")
-		}
-	}
+	status := echo.status()
+	nonceSeen := liveContains(status.Seen, nonce)
 	after, err := liveCounters(ctx, label)
 	if err != nil {
 		return err
+	}
+	if (response.Connected && strings.HasPrefix(network, "tcp")) || response.Echo || nonceSeen {
+		return fmt.Errorf("controlled connection was delivered: connected=%t echo=%t accepted=%d nonce_seen=%t deny_packets=%d->%d deny_bytes=%d->%d", response.Connected, response.Echo, status.Accepted, nonceSeen, before.packets, after.packets, before.bytes, after.bytes)
 	}
 	if after.packets <= before.packets || after.bytes <= before.bytes {
 		return errors.New("deny packet and byte counters did not increase")
