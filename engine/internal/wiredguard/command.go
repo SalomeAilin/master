@@ -13,13 +13,14 @@ import (
 
 func Run(ctx context.Context, args []string) error {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Println("wired-app: plan | preflight | start | status | recover | release [-uid <existing-user-id>]")
+		fmt.Println("wired-app: plan | preflight | start | status | evidence | recover | release [-uid <existing-user-id>]")
 		fmt.Println("start requires the installed engine, administrator authorization, and all existing Baidu processes closed. No daemon is installed.")
+		fmt.Println("evidence reads the current session, samples its proxy connections three times, and returns recent private proxy logs as JSON.")
 		return nil
 	}
 	action := args[0]
 	switch action {
-	case "plan", "preflight", "start", "status", "recover", "release", "_launch":
+	case "plan", "preflight", "start", "status", "evidence", "recover", "release", "_launch":
 	default:
 		return errors.New("unknown wired-app action")
 	}
@@ -52,6 +53,21 @@ func Run(ctx context.Context, args []string) error {
 		return errors.New("administrator authorization is required for PF and complete socket ownership inspection")
 	}
 	store := Store{Path: Directory, Owner: 0}
+	if action == "evidence" {
+		state, err := store.Read()
+		if err != nil {
+			return err
+		}
+		account, err := LookupAccount(state.UID)
+		if err != nil {
+			return err
+		}
+		report, err := (&Native{Store: store, Account: account}).Evidence(ctx, state)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(report)
+	}
 	if action == "status" {
 		state, err := store.Read()
 		if os.IsNotExist(err) {

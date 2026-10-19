@@ -18,7 +18,7 @@
 
 ### 百度网盘的临时有线会话
 
-`wired-app` 已加入源码，**尚未部署，也未通过管理员和真实拔线验收**。它不安装新后台任务，不改现有 DNS、路由或系统代理。只有显式 `start` 才会创建会话和加载专用 PF 规则；平常的 `run`、`service` 与原状态任务不启用此功能。
+`wired-app` 已加入源码。**2026-10-19 本机 PF 门槛和候选隔离预检已通过；尚未部署，真实下载与物理拔线仍未验收。** 它不安装新后台任务，不改现有 DNS、路由或系统代理。只有显式 `start` 才会创建会话和加载专用 PF 规则；平常的 `run`、`service` 与原状态任务不启用此功能。
 
 ```sh
 /usr/local/libexec/network-domain-engine wired-app plan
@@ -36,9 +36,12 @@ PF 检查采取严格的支持范围：主过滤规则须能到达现有 `com.ap
 
 ```sh
 sudo /usr/local/libexec/network-domain-engine wired-app status
+sudo /usr/local/libexec/network-domain-engine wired-app evidence
 sudo /usr/local/libexec/network-domain-engine wired-app recover
 sudo /usr/local/libexec/network-domain-engine wired-app release
 ```
+
+`evidence` 只读核验本会话的代理 PID、启动时间和 PF 屏障，按 PID 采样三次完整接口连接 CSV，并读取最近 128 KiB 私有代理日志，统一输出到终端 JSON；采样前后再次核验身份与屏障，不生成报告文件，也不下载探测内容。实际下载时，按日志中的连接四元组对应采样的接口及字节增长，再与具体下载文件增长核对；该命令本身不判定下载或物理断线已经通过。输出含本机连接信息，只留本机。
 
 恢复不会自动重启应用或拆除仍有进程的屏障。GUI 启动器须先登记 root 进程身份并取得确认才可创建应用；释放也等待这个启动器退出，避免启动超时后才出现应用。中途已清空专用规则的释放阶段会如实记录，可在确认进程/socket 为空后继续释放自己的 token；未知规则或状态会停止自动清理。小型 root 状态保留在 `/var/db/network-domain-wired-app`，临时缓存采用 root 所有的父目录与 nobody 所有的 worker 子目录，路径记录在状态中，成功释放时通过固定目录描述符清理。存在活动或未收尾会话时 `upgrade` 拒绝执行，并持有与会话创建相同的锁直到升级结束。应用签名校验兼容标准的 root:admin、775 的 `/Applications`，不改变其权限；管理员替换应用或泄漏 root 监听 FD 均超出普通用户隔离边界。
 
