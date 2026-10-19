@@ -27,6 +27,16 @@ type Native struct {
 	Listener net.Listener
 }
 
+// App Store binaries carry Apple's leaf certificate; their publisher is in
+// signed entitlements. Developer ID binaries identify it in the certificate.
+const appRequirement = `=anchor apple generic and identifier "com.baidu.netdisk" and (
+ (certificate leaf[field.1.2.840.113635.100.6.1.9]
+  and entitlement["com.apple.developer.team-identifier"] = "LKD5676Y5W"
+  and entitlement["com.apple.application-identifier"] = "LKD5676Y5W.com.baidu.netdisk")
+ or (certificate 1[field.1.2.840.113635.100.6.2.6]
+  and certificate leaf[field.1.2.840.113635.100.6.1.13]
+  and certificate leaf[subject.OU] = "LKD5676Y5W"))`
+
 func LookupAccount(uid uint32) (Account, error) {
 	a := Account{UID: uid}
 	if uid == 0 || uid > 2147483647 {
@@ -193,7 +203,7 @@ func (n *Native) Preflight(ctx context.Context, s *State) error {
 	if err := trustedExecutable(App); err != nil {
 		return err
 	}
-	if _, err := command(ctx, "", "/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", `anchor apple generic and certificate leaf[subject.OU] = "LKD5676Y5W" and identifier "com.baidu.netdisk"`, AppBundle); err != nil {
+	if _, err := command(ctx, "", "/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", appRequirement, AppBundle); err != nil {
 		return err
 	}
 	wired, err := installedWiredInterface(ctx, true)
