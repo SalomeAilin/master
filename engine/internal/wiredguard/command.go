@@ -15,7 +15,7 @@ func Run(ctx context.Context, args []string) error {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Println("wired-app: plan | preflight | start | status | evidence | recover | release [-uid <existing-user-id>]")
 		fmt.Println("start requires the installed engine, administrator authorization, and all existing Baidu processes closed. No daemon is installed.")
-		fmt.Println("evidence reads the current session, samples its proxy connections three times, and returns recent private proxy logs as JSON.")
+		fmt.Println("evidence samples the proxy and controlled app processes three times, with private PF counters and recent proxy logs in JSON.")
 		return nil
 	}
 	action := args[0]
@@ -83,8 +83,9 @@ func Run(ctx context.Context, args []string) error {
 		native := &Native{Store: store, Account: account}
 		snap, inspectErr := native.Inspect(ctx, &state)
 		processes, sockets, ownerErr := Ownership(state, snap)
+		counts, countErr := CountSockets(state, snap)
 		verifyErr := native.Verify(ctx, state)
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"state": state, "controlled_processes": processes, "controlled_socket_handles": sockets, "barrier_verified": verifyErr == nil, "inspection_error": errorText(errors.Join(inspectErr, ownerErr, verifyErr)), "physical_disconnect_verified": false, "boundary": "ordinary-GID Finder/XPC brokers are outside this session"})
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"state": state, "controlled_processes": processes, "remaining_socket_objects": sockets, "controlled_holder_socket_objects": counts.Controlled, "seen_socket_objects_still_held": counts.Observed, "socket_observation_persisted": state.SocketObservationStarted, "status_observation_saved": false, "original_socket_credentials": "unknown: libproc does not expose so_cred", "barrier_verified": verifyErr == nil, "inspection_error": errorText(errors.Join(inspectErr, ownerErr, countErr, verifyErr)), "physical_disconnect_verified": false, "boundary": "ordinary-GID external brokers and socket transfers never observed by the controller are outside this session"})
 	}
 	if action != "preflight" {
 		if err := RequireInstalled(); err != nil {
@@ -193,6 +194,9 @@ func Run(ctx context.Context, args []string) error {
 			}
 			snap, err = native.Inspect(ctx, &state)
 			if err != nil {
+				return controller.hold(&state, err)
+			}
+			if err = controller.Observe(&state, snap); err != nil {
 				return controller.hold(&state, err)
 			}
 			processes, sockets, err := Ownership(state, snap)

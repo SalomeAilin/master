@@ -76,3 +76,29 @@ func TestStateWriteAndReadPreserveReleasePhase(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestObservedSocketHistorySurvivesReloadAndStaysBounded(t *testing.T) {
+	store := testStore(t)
+	s := activeState()
+	for i := range 4096 {
+		key := testSocket().Key
+		key.Handle = uint64(i) + 1
+		s.SeenSockets = append(s.SeenSockets, key)
+	}
+	if err := store.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Read()
+	if err != nil || len(loaded.SeenSockets) != 4096 || !loaded.SocketObservationStarted || loaded.SeenSockets[4095] != s.SeenSockets[4095] {
+		t.Fatal("socket history was lost across reload", len(loaded.SeenSockets), err)
+	}
+	s.SeenSockets = nil
+	s.SocketObservationStarted = false
+	if err = store.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = store.Read()
+	if err != nil || loaded.SocketObservationStarted {
+		t.Fatal("legacy schema acquired an invented observation history", err)
+	}
+}

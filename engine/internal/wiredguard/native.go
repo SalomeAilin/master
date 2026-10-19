@@ -275,7 +275,11 @@ func (n *Native) Enable(ctx context.Context) (string, error) {
 }
 
 func (n *Native) Load(ctx context.Context, s State) (string, error) {
-	if _, err := pf(ctx, Rules(s.UID, s.GID), "-a", Anchor, "-f", "-"); err != nil {
+	rules, err := Rules(s)
+	if err != nil {
+		return "", err
+	}
+	if _, err := pf(ctx, rules, "-a", Anchor, "-f", "-"); err != nil {
 		return "", err
 	}
 	actual, err := pf(ctx, "", "-a", Anchor, "-sr")
@@ -806,7 +810,7 @@ func SelectGID(account Account, snap Snapshot) (uint32, error) {
 			}
 		}
 		for _, socket := range snap.Sockets {
-			if socket.GID == gid {
+			if socket.Holder.GID == gid || socket.Holder.RealGID == gid || socket.Holder.SavedGID == gid {
 				used = true
 			}
 		}

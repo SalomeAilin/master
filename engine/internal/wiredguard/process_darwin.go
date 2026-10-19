@@ -9,7 +9,10 @@ package wiredguard
 #include <stdlib.h>
 #include <errno.h>
 
-struct wired_socket { unsigned int uid; unsigned int gid; unsigned long long handle; };
+struct wired_socket {
+    unsigned long long handle, pcb, generation;
+    int family, protocol;
+};
 
 static int wired_sockets(int pid, struct wired_socket *out, int capacity) {
     errno = 0;
@@ -31,9 +34,15 @@ static int wired_sockets(int pid, struct wired_socket *out, int capacity) {
         if (n != sizeof(info)) { if (errno == EBADF || errno == ENOENT) continue; free(fds); return -1; }
         if (info.psi.soi_family != AF_INET && info.psi.soi_family != AF_INET6) continue;
         if (used == capacity) { free(fds); errno = EOVERFLOW; return -1; }
-        out[used].uid = info.psi.soi_stat.vst_uid;
-        out[used].gid = info.psi.soi_stat.vst_gid;
         out[used].handle = info.psi.soi_so;
+        out[used].pcb = info.psi.soi_pcb;
+        out[used].generation = 0;
+        out[used].family = info.psi.soi_family;
+        out[used].protocol = info.psi.soi_protocol;
+        if (info.psi.soi_kind == SOCKINFO_TCP)
+            out[used].generation = info.psi.soi_proto.pri_tcp.tcpsi_ini.insi_gencnt;
+        else if (info.psi.soi_kind == SOCKINFO_IN)
+            out[used].generation = info.psi.soi_proto.pri_in.insi_gencnt;
         used++;
     }
     free(fds);
@@ -71,6 +80,7 @@ func nativeSnapshot(ctx context.Context, uid uint32) (Snapshot, error) {
 		if pid <= 0 || p.Proc.P_stat == 5 {
 			continue
 		} // zombies have no open descriptors
+		holder := processCredentials(p)
 		if p.Eproc.Ucred.Uid != uid {
 			nameBytes := make([]byte, 0, len(p.Proc.P_comm))
 			for _, c := range p.Proc.P_comm {
@@ -101,8 +111,8 @@ func nativeSnapshot(ctx context.Context, uid uint32) (Snapshot, error) {
 			}
 			result.Processes = append(result.Processes, identity)
 		}
-		// A descriptor can be passed to another UID without changing the socket's
-		// original credentials. Inspect every process, not just the app account.
+		// Search every process for previously observed keys after descriptor
+		// transfer. libproc's soi_stat fields do not expose socket credentials.
 		var sockets [4096]C.struct_wired_socket
 		count, callErr := C.wired_sockets(C.int(pid), &sockets[0], C.int(len(sockets)))
 		if count < 0 {
@@ -112,10 +122,10 @@ func nativeSnapshot(ctx context.Context, uid uint32) (Snapshot, error) {
 			return result, fmt.Errorf("cannot inspect socket ownership for process %d: %v", pid, callErr)
 		}
 		for i := 0; i < int(count); i++ {
-			result.Sockets = append(result.Sockets, Socket{UID: uint32(sockets[i].uid), GID: uint32(sockets[i].gid), Handle: uint64(sockets[i].handle)})
+			result.Sockets = append(result.Sockets, Socket{Holder: holder, Key: SocketKey{Handle: uint64(sockets[i].handle), PCB: uint64(sockets[i].pcb), Generation: uint64(sockets[i].generation), Family: int(sockets[i].family), Protocol: int(sockets[i].protocol)}})
 		}
 		current, e := unix.SysctlKinfoProc("kern.proc.pid", pid)
-		if e == nil && (current.Proc.P_starttime != p.Proc.P_starttime || current.Eproc.Ucred.Uid != p.Eproc.Ucred.Uid) {
+		if e == nil && processCredentials(*current) != holder {
 			return result, errors.New("process identity changed during socket scan")
 		}
 		if e != nil && !gone(pid) {
@@ -126,6 +136,10 @@ func nativeSnapshot(ctx context.Context, uid uint32) (Snapshot, error) {
 		}
 	}
 	return result, nil
+}
+
+func processCredentials(p unix.KinfoProc) Identity {
+	return Identity{PID: int(p.Proc.P_pid), Started: p.Proc.P_starttime.Sec*1000000 + int64(p.Proc.P_starttime.Usec), UID: p.Eproc.Ucred.Uid, GID: p.Eproc.Ucred.Groups[0], RealGID: p.Eproc.Pcred.P_rgid, SavedGID: p.Eproc.Pcred.P_svgid}
 }
 
 func gone(pid int) bool {
@@ -152,5 +166,7 @@ func nativeIdentity(pid int) (Identity, error) {
 		}
 		return Identity{}, fmt.Errorf("cannot identify process %d: %v", pid, err)
 	}
-	return Identity{PID: pid, Started: p.Proc.P_starttime.Sec*1000000 + int64(p.Proc.P_starttime.Usec), Path: C.GoString(&path[0]), UID: p.Eproc.Ucred.Uid, GID: p.Eproc.Ucred.Groups[0], RealGID: p.Eproc.Pcred.P_rgid, SavedGID: p.Eproc.Pcred.P_svgid}, nil
+	identity := processCredentials(*p)
+	identity.Path = C.GoString(&path[0])
+	return identity, nil
 }

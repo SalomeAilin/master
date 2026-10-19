@@ -18,7 +18,7 @@
 
 ### 百度网盘的临时有线会话
 
-`wired-app` 已加入源码。**2026-10-19 本机 PF 门槛和候选隔离预检已通过；尚未部署，真实下载与物理拔线仍未验收。** 它不安装新后台任务，不改现有 DNS、路由或系统代理。只有显式 `start` 才会创建会话和加载专用 PF 规则；平常的 `run`、`service` 与原状态任务不启用此功能。
+**2026-10-19，0.3.6 已部署并通过系统升级验收和本机 PF 门槛；真实下载未通过。** 保存 HTTP 代理并重启网盘后，账号和文件列表恢复；原生下载辅助程序仍尝试直连，下载请求被阻断后超时。源码中的 `0.3.7-wired-app` 修正 socket 统计，并增加有线 IPv4 TCP 的双向直连许可，尚待管理员门槛、真实下载和物理拔线验收。它不安装新后台任务，不改现有 DNS、路由或系统代理；只有显式 `start` 才创建会话和专用 PF 规则，平常的 `run`、`service` 与原状态任务不启用此功能。
 
 ```sh
 /usr/local/libexec/network-domain-engine wired-app plan
@@ -28,11 +28,11 @@ sudo /usr/local/libexec/network-domain-engine wired-app start -uid "$(id -u)"
 
 部署仍按下文的管理员授权流程进行；上述命令只有在更新原 Go 程序后才可用。`preflight` 只读检查。开始前须明确同意退出、重启百度网盘，并先关闭现有主程序及下载 helper；程序发现旧实例会拒绝运行，不自行结束用户应用。只支持 `/Applications/BaiduNetdisk.app` 的原始签名程序，应用仍以原 UID 运行，将主 GID 换成未占用的会话 GID，保留原补充组。旧主组不会自动成为额外补充组，不修改系统组数据库或组上限。
 
-会话使用现有配置中经过交叉核对的 Ethernet/LAN 接口；连接和 DoH 都通过内核 `IP_BOUND_IF` 绑定该接口，关闭 Multipath TCP。临时代理监听 `127.0.0.1:17891`，由 root 预绑定并把同一个监听 socket 交给 nobody，不释放端口后重新绑定。出网 socket 仍由低权限代理创建。PF 只允许受控 UID/GID 连接该端口，并要求入站服务 socket 保持 root 创建的凭据，四个回环方向均明确不创建 state，阻断其余 TCP/UDP，包括 IPv6 和其他本机代理。百度网盘内的 HTTP 代理需设为这个地址。
+会话使用现有配置中经过交叉核对的 Ethernet/LAN 接口。临时代理的连接和 DoH 通过内核 `IP_BOUND_IF` 绑定该接口，关闭 Multipath TCP；原生辅助程序的受控 IPv4 TCP 只允许在该有线接口双向收发，其余接口、IPv6 和 UDP 双向阻断。PF 不改变路由选择，原生连接选到其他接口时仍会失败。临时代理监听 `127.0.0.1:17891`，由 root 预绑定并把同一个监听 socket 交给 nobody，不释放端口后重新绑定；出网 socket 由低权限代理创建。PF 允许受控 UID/GID 连接该端口，并要求入站服务 socket 保持 root 创建的凭据；有线及四个回环方向均不创建 state，其他本机代理仍被阻断。百度网盘内的 HTTP 代理需设为这个地址。
 
-PF 检查采取严格的支持范围：主过滤规则须能到达现有 `com.apple/*` 入口，不能跳过接口，不能有本功能之外的 pass、quick、转换旁路或既存 state。遇到不兼容规则会拒绝，不重载全局规则、不清空连接。专用规则放在 `com.apple/000.network-domain-wired-app`；只释放本会话的 PF token。管理员须验证本机 listener/accept 的 PF 凭据行为与 socket GID；离线测试不证明这两项已经成立。
+PF 检查采取严格的支持范围：主过滤规则须能到达现有 `com.apple/*` 入口，不能跳过接口，不能有本功能之外的 pass、quick、转换旁路或既存 state。遇到不兼容规则会拒绝，不重载全局规则、不清空连接。专用规则放在 `com.apple/000.network-domain-wired-app`；只释放本会话的 PF token。管理员须验证本机 listener/accept 的 PF 凭据行为、进程身份和 socket 句柄持有者；离线测试不能代替这些验证。
 
-`start` 在前台管理本次会话。应用及 helper 都退出、受控 socket handle 消失后才撤销规则和退出；代理故障或控制进程中断时保留 PF。仍有应用、身份不明或检查失败时不解除阻断。可用下列命令检查、恢复或在手动关闭应用后释放：
+`start` 在前台管理本次会话。应用及 helper 都退出，控制器已见的 socket 对象在两次完整扫描中均无持有者后，才撤销规则和退出；代理故障或控制进程中断时保留 PF。仍有应用、已见 socket 被其他进程持有、身份不明或检查失败时不解除阻断。可用下列命令检查、恢复或在手动关闭应用后释放：
 
 ```sh
 sudo /usr/local/libexec/network-domain-engine wired-app status
@@ -41,11 +41,11 @@ sudo /usr/local/libexec/network-domain-engine wired-app recover
 sudo /usr/local/libexec/network-domain-engine wired-app release
 ```
 
-`evidence` 只读核验本会话的代理 PID、启动时间和 PF 屏障，按 PID 采样三次完整接口连接 CSV，并读取最近 128 KiB 私有代理日志，统一输出到终端 JSON；采样前后再次核验身份与屏障，不生成报告文件，也不下载探测内容。实际下载时，按日志中的连接四元组对应采样的接口及字节增长，再与具体下载文件增长核对；该命令本身不判定下载或物理断线已经通过。输出含本机连接信息，只留本机。
+`evidence` 按精确 PID 采样代理和当前受控网盘进程，最多 64 个，输出三次全接口连接 CSV、前后各不超过 128 KiB 的 PF label 计数，以及最近 128 KiB 私有代理日志。采样前后核验代理、进程启动身份和 PF；正常退出或新出现的辅助进程另行列出，PID 被复用或身份改变则拒绝输出已核验结果。命令只读，不下载、不写报告、不自动判定下载成功。实际验收须把具体文件增长与对应进程、连接、接口和双向计数关联；原生辅助程序的流量不会出现在代理日志里。输出含本机连接信息，只留本机。
 
 恢复不会自动重启应用或拆除仍有进程的屏障。GUI 启动器须先登记 root 进程身份并取得确认才可创建应用；释放也等待这个启动器退出，避免启动超时后才出现应用。中途已清空专用规则的释放阶段会如实记录，可在确认进程/socket 为空后继续释放自己的 token；未知规则或状态会停止自动清理。小型 root 状态保留在 `/var/db/network-domain-wired-app`，临时缓存采用 root 所有的父目录与 nobody 所有的 worker 子目录，路径记录在状态中，成功释放时通过固定目录描述符清理。存在活动或未收尾会话时 `upgrade` 拒绝执行，并持有与会话创建相同的锁直到升级结束。应用签名校验兼容标准的 root:admin、775 的 `/Applications`，不改变其权限；管理员替换应用或泄漏 root 监听 FD 均超出普通用户隔离边界。
 
-保护范围是继承会话身份的进程及其 TCP/UDP socket。Finder、LaunchServices 或 XPC broker 另行创建的普通 GID 进程不在这个范围内；发现其参与下载时不得宣称全部锁线。五秒检查只能发现变化，不能补足内核覆盖。验收须关联真实文件写入、helper、临时代理和有线字节增长，并在保留 Wi-Fi 的情况下物理拔掉有线检查停止传输、没有 Wi-Fi 回落。UDP 要用前后正常回显、独立 nonce 未到监听端以及对应 deny 计数增长一起判断，不能把 Write 成功或等待超时当成阻断证据。错误接口模拟也不等于真实拔线通过。
+保护按继承会话身份的正常应用进程设计。libproc 不提供原始 socket 凭据，`status/evidence` 明确记为 unknown；控制器按持有进程记录已见对象的 SO、PCB、generation、family 和 protocol。完整扫描后，持久化仍可见的已见对象及本次新见对象，最多 4096 项，只有集合变化时重写。`status/evidence` 本身不保存新观察；旧状态缺少观察记录时不能冒充已采样，须显式恢复后再检查释放条件。首次观察前、扫描间完全未被观察到的 FD 转移、排队中的 rights，以及 Finder、LaunchServices、XPC 等普通 GID 外部 broker 均不在此保证内。发现外部 broker 参与下载时不得宣称全部锁线。五秒扫描不能补足内核覆盖；验收须关联真实文件写入、helper、临时代理、有线字节及双向 PF 计数，并在保留 Wi-Fi 时物理拔掉有线核对停止传输、没有 Wi-Fi 回落。UDP 用前后正常回显、独立 nonce 未到监听端及对应 deny 增长判断；Write 成功或超时、错误接口模拟都不能代替实机或真实拔线验收。
 
 ## 一个程序，多进程
 
@@ -90,10 +90,10 @@ GOTOOLCHAIN=go1.26.8 go test -tags integration -run Integration -timeout 5m .
 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go test -c \
   -o "$STAGE/wiredguard-live.test" ./internal/wiredguard
 sudo env MASTER_WIRED_PF_LIVE=1 MASTER_WIRED_PF_UID="$(id -u)" \
-  "$STAGE/wiredguard-live.test" -test.run='^TestWiredPFLive$' -test.timeout=1m -test.v
+  "$STAGE/wiredguard-live.test" -test.run='^TestWiredPFLive$' -test.timeout=90s -test.v
 ```
 
-该测试只收发本机回环数据，检查 TCP/UDP 的 IPv4、IPv6 拦截及监听 socket 身份，不下载文件，也不自行退出用户应用。测试会临时加载专用规则并持久记录自己的 token；已有会话或不兼容规则会拒绝。正常结束先回收测试进程和套接字，再释放规则；被强制终止或无法确认归属时保留状态，按 `wired-app status/release` 检查收尾。通过本项后，仍需网盘实际下载与物理拔线验收。
+该测试只收发本机回环数据，分别检查 TCP/UDP、IPv4/IPv6 的出站和入站拦截，以及可信监听 socket 身份；不下载文件，也不自行退出用户应用。测试会临时加载专用规则并持久记录自己的 token；已有会话或不兼容规则会拒绝。正常结束先回收测试进程和套接字，再释放规则；被强制终止或无法确认归属时保留状态，按 `wired-app status/release` 检查收尾。通过本项后，仍需验证原生下载辅助程序的有线双向收发及物理拔线。
 
 ## 构建
 

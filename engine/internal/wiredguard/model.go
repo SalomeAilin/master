@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -32,9 +34,23 @@ type Identity struct {
 	SavedGID uint32 `json:"saved_gid"`
 }
 
+type SocketKey struct {
+	Handle     uint64 `json:"handle"`
+	PCB        uint64 `json:"pcb"`
+	Generation uint64 `json:"generation"`
+	Family     int    `json:"family"`
+	Protocol   int    `json:"protocol"`
+}
+
+func (key SocketKey) valid() bool {
+	return key.Handle != 0 && key.PCB != 0 && key.Generation != 0 &&
+		(key.Family == unix.AF_INET || key.Family == unix.AF_INET6) && key.Protocol >= 0 && key.Protocol <= 255
+}
+
+// libproc exposes the holder and an opaque socket key, but not so_cred.
 type Socket struct {
-	UID, GID uint32
-	Handle   uint64
+	Key    SocketKey
+	Holder Identity
 }
 type Snapshot struct {
 	Processes []Identity
@@ -47,19 +63,21 @@ type Account struct {
 }
 
 type State struct {
-	Version       int       `json:"version"`
-	UID           uint32    `json:"uid"`
-	GID           uint32    `json:"gid"`
-	Phase         string    `json:"phase"`
-	Token         string    `json:"pf_enable_token,omitempty"`
-	RuleHash      string    `json:"loaded_rule_sha256,omitempty"`
-	Proxy         *Identity `json:"proxy,omitempty"`
-	App           *Identity `json:"app,omitempty"`
-	LastError     string    `json:"last_error,omitempty"`
-	Cache         string    `json:"proxy_cache,omitempty"`
-	Wired         string    `json:"wired_interface"`
-	Launcher      *Identity `json:"gui_launcher,omitempty"`
-	LaunchPending bool      `json:"launch_pending,omitempty"`
+	Version                  int         `json:"version"`
+	UID                      uint32      `json:"uid"`
+	GID                      uint32      `json:"gid"`
+	Phase                    string      `json:"phase"`
+	Token                    string      `json:"pf_enable_token,omitempty"`
+	RuleHash                 string      `json:"loaded_rule_sha256,omitempty"`
+	Proxy                    *Identity   `json:"proxy,omitempty"`
+	App                      *Identity   `json:"app,omitempty"`
+	LastError                string      `json:"last_error,omitempty"`
+	Cache                    string      `json:"proxy_cache,omitempty"`
+	Wired                    string      `json:"wired_interface"`
+	Launcher                 *Identity   `json:"gui_launcher,omitempty"`
+	LaunchPending            bool        `json:"launch_pending,omitempty"`
+	SocketObservationStarted bool        `json:"socket_observation_started,omitempty"`
+	SeenSockets              []SocketKey `json:"seen_sockets,omitempty"`
 }
 
 func (s State) Validate() error {
@@ -102,20 +120,37 @@ func (s State) Validate() error {
 	if s.Launcher != nil && (s.Launcher.PID <= 0 || s.Launcher.Started <= 0 || s.Launcher.UID != 0 || s.Launcher.GID != 0 || s.Launcher.RealGID != 0 || s.Launcher.SavedGID != 0 || s.Launcher.Path != Binary) {
 		return errors.New("invalid privileged GUI producer identity")
 	}
+	if len(s.SeenSockets) > 4096 || (len(s.SeenSockets) != 0 && !s.SocketObservationStarted) {
+		return errors.New("invalid socket observation history")
+	}
+	seen := make(map[SocketKey]bool, len(s.SeenSockets))
+	for _, key := range s.SeenSockets {
+		if !key.valid() || seen[key] {
+			return errors.New("invalid or duplicate observed socket key")
+		}
+		seen[key] = true
+	}
 	return nil
 }
 
 func Digest(rules string) string { h := sha256.Sum256([]byte(rules)); return hex.EncodeToString(h[:]) }
 
-func Rules(uid, gid uint32) string {
+func Rules(s State) (string, error) {
+	if err := s.Validate(); err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(`pass out quick on lo0 inet proto tcp from 127.0.0.1 to 127.0.0.1 port = %[1]d user = %[2]d group = %[3]d flags any no state label "wired-app-loopback"
 pass in quick on lo0 inet proto tcp from 127.0.0.1 to 127.0.0.1 port = %[1]d user = 0 group = 0 flags any no state label "wired-app-root-listener"
 block drop in quick on lo0 inet proto tcp from 127.0.0.1 to 127.0.0.1 port = %[1]d label "wired-app-deny-server"
 pass out quick on lo0 inet proto tcp from 127.0.0.1 port = %[1]d to 127.0.0.1 user = 0 group = 0 flags any no state label "wired-app-server-reply"
 pass in quick on lo0 inet proto tcp from 127.0.0.1 port = %[1]d to 127.0.0.1 user = %[2]d group = %[3]d flags any no state label "wired-app-client-reply"
+pass out quick on %[4]s inet proto tcp all user = %[2]d group = %[3]d flags any no state label "wired-app-wired-tcp-out"
+pass in quick on %[4]s inet proto tcp all user = %[2]d group = %[3]d flags any no state label "wired-app-wired-tcp-in"
 block drop out quick proto tcp all user = %[2]d group = %[3]d label "wired-app-deny-tcp"
 block drop out quick proto udp all user = %[2]d group = %[3]d label "wired-app-deny-udp"
-`, Port, uid, gid)
+block drop in quick proto tcp all user = %[2]d group = %[3]d label "wired-app-deny-tcp-in"
+block drop in quick proto udp all user = %[2]d group = %[3]d label "wired-app-deny-udp-in"
+`, Port, s.UID, s.GID, s.Wired), nil
 }
 
 func SameProcess(a, b Identity) bool {
@@ -132,6 +167,43 @@ func IsBaidu(p Identity) bool {
 		return true
 	}
 	return false
+}
+
+func sessionHolder(s State, holder Identity) bool {
+	return holder.GID == s.GID || holder.RealGID == s.GID || holder.SavedGID == s.GID
+}
+
+type SocketCounts struct {
+	Controlled int
+	Observed   int
+	Remaining  int
+}
+
+func CountSockets(s State, snap Snapshot) (SocketCounts, error) {
+	var counts SocketCounts
+	seen := make(map[SocketKey]bool, len(s.SeenSockets))
+	handles := make(map[uint64]bool, len(s.SeenSockets))
+	for _, key := range s.SeenSockets {
+		seen[key] = true
+		handles[key.Handle] = true
+	}
+	controlled, observed, remaining := map[SocketKey]bool{}, map[SocketKey]bool{}, map[SocketKey]bool{}
+	for _, socket := range snap.Sockets {
+		if handles[socket.Key.Handle] && !socket.Key.valid() {
+			return counts, errors.New("previously observed socket has an incomplete key")
+		}
+		if sessionHolder(s, socket.Holder) {
+			if socket.Holder.PID <= 0 || socket.Holder.Started <= 0 || !socket.Key.valid() {
+				return counts, errors.New("controlled socket has an incomplete holder identity or opaque key")
+			}
+			controlled[socket.Key], remaining[socket.Key] = true, true
+		}
+		if seen[socket.Key] {
+			observed[socket.Key], remaining[socket.Key] = true, true
+		}
+	}
+	counts.Controlled, counts.Observed, counts.Remaining = len(controlled), len(observed), len(remaining)
+	return counts, nil
 }
 
 func Ownership(s State, snap Snapshot) (processes int, sockets int, err error) {
@@ -152,11 +224,9 @@ func Ownership(s State, snap Snapshot) (processes int, sockets int, err error) {
 			err = errors.New("Baidu process outside the controlled session; coverage is incomplete")
 		}
 	}
-	for _, socket := range snap.Sockets {
-		if socket.UID == s.UID && socket.GID == s.GID {
-			sockets++
-		}
-	}
+	counts, socketErr := CountSockets(s, snap)
+	sockets = counts.Remaining
+	err = errors.Join(err, socketErr)
 	if s.LaunchPending && s.Launcher == nil {
 		err = errors.New("unacknowledged GUI launch intent; manual process inspection is required")
 	}
@@ -182,6 +252,56 @@ type System interface {
 }
 
 type Controller struct{ System System }
+
+// Observe records keys while their holder still has the session identity. It
+// cannot discover a transfer that completed before any such observation.
+func (c Controller) Observe(s *State, snap Snapshot) error {
+	seen := make(map[SocketKey]bool, len(s.SeenSockets))
+	handles := make(map[uint64]bool, len(s.SeenSockets))
+	for _, key := range s.SeenSockets {
+		seen[key] = true
+		handles[key.Handle] = true
+	}
+	present := make(map[SocketKey]bool, len(snap.Sockets))
+	for _, socket := range snap.Sockets {
+		if socket.Key.valid() {
+			present[socket.Key] = true
+		} else if handles[socket.Key.Handle] {
+			return errors.New("previously observed socket has an incomplete key; barrier retained")
+		}
+	}
+	changed := !s.SocketObservationStarted
+	var keys []SocketKey
+	for _, key := range s.SeenSockets {
+		if present[key] {
+			keys = append(keys, key)
+		} else {
+			delete(seen, key)
+			changed = true
+		}
+	}
+	for _, socket := range snap.Sockets {
+		if !sessionHolder(*s, socket.Holder) {
+			continue
+		}
+		if socket.Holder.PID <= 0 || socket.Holder.Started <= 0 || !socket.Key.valid() {
+			return errors.New("cannot record a controlled socket with an incomplete holder identity or opaque key")
+		}
+		if !seen[socket.Key] {
+			if len(keys) == 4096 {
+				return errors.New("socket observation history exceeds limit; barrier retained")
+			}
+			keys = append(keys, socket.Key)
+			seen[socket.Key], changed = true, true
+		}
+	}
+	if changed {
+		s.SocketObservationStarted = true
+		s.SeenSockets = keys
+		return c.System.Save(*s)
+	}
+	return nil
+}
 
 func (c Controller) hold(s *State, err error) error {
 	if !releasing(s.Phase) {
@@ -209,8 +329,8 @@ func (c Controller) Start(ctx context.Context, s *State) error {
 		}
 	}
 	for _, socket := range snap.Sockets {
-		if socket.GID == s.GID {
-			return errors.New("reserved GID already owns a socket")
+		if sessionHolder(*s, socket.Holder) {
+			return errors.New("reserved GID already holds a socket")
 		}
 	}
 	if err = c.System.Preflight(ctx, nil); err != nil {
@@ -269,7 +389,21 @@ func (c Controller) Start(ctx context.Context, s *State) error {
 	}
 	s.App, s.Phase = &app, "active"
 	s.LaunchPending = false
-	return c.System.Save(*s)
+	if err = c.System.Save(*s); err != nil {
+		return err
+	}
+	snap, err = c.System.Inspect(ctx, s)
+	if err != nil {
+		return c.hold(s, err)
+	}
+	if err = c.Observe(s, snap); err != nil {
+		return c.hold(s, err)
+	}
+	_, _, err = Ownership(*s, snap)
+	if err != nil {
+		return c.hold(s, err)
+	}
+	return nil
 }
 
 func (c Controller) Recover(ctx context.Context, s *State) error {
@@ -288,6 +422,9 @@ func (c Controller) Recover(ctx context.Context, s *State) error {
 	}
 	snap, err := c.System.Inspect(ctx, s)
 	if err != nil {
+		return c.hold(s, err)
+	}
+	if err = c.Observe(s, snap); err != nil {
 		return c.hold(s, err)
 	}
 	_, _, err = Ownership(*s, snap)
@@ -311,6 +448,9 @@ func (c Controller) Release(ctx context.Context, s *State) error {
 	if s.RuleHash == "" || s.Token == "" {
 		return c.hold(s, errors.New("incomplete PF ownership record; automatic release refused"))
 	}
+	if s.App != nil && !s.SocketObservationStarted {
+		return c.hold(s, errors.New("session has no persisted socket observations; inspect and recover it explicitly before release"))
+	}
 	barrier := true
 	if releasing(s.Phase) {
 		var err error
@@ -324,6 +464,9 @@ func (c Controller) Release(ctx context.Context, s *State) error {
 	for range 2 {
 		snap, err := c.System.Inspect(ctx, s)
 		if err != nil {
+			return c.hold(s, err)
+		}
+		if err = c.Observe(s, snap); err != nil {
 			return c.hold(s, err)
 		}
 		p, sockets, err := Ownership(*s, snap)

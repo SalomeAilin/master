@@ -90,7 +90,11 @@ func nonemptyLines(text string) []string {
 // PF may render a numeric UID as its account name. Only that exact account's
 // name is accepted; all other words and the complete rule order must match.
 func ValidateLoadedRules(actual string, s State, username string) error {
-	got, want := nonemptyLines(actual), nonemptyLines(Rules(s.UID, s.GID))
+	rules, err := Rules(s)
+	if err != nil {
+		return err
+	}
+	got, want := nonemptyLines(actual), nonemptyLines(rules)
 	if len(got) != len(want) {
 		return errors.New("unexpected private PF rule count")
 	}

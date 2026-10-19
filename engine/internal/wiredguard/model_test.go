@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 type fakeSystem struct {
@@ -125,7 +127,12 @@ func activeState() State {
 	s.RuleHash = Digest("expected")
 	proxy, app := proxyIdentity(), appIdentity()
 	s.Proxy, s.App = &proxy, &app
+	s.SocketObservationStarted = true
 	return s
+}
+
+func testSocket() Socket {
+	return Socket{Holder: appIdentity(), Key: SocketKey{Handle: 9, PCB: 10, Generation: 11, Family: unix.AF_INET, Protocol: unix.IPPROTO_TCP}}
 }
 
 func TestStartEveryFailureKeepsBarrierAndNeverCleansAnApplication(t *testing.T) {
@@ -162,7 +169,7 @@ func TestStartRejectsOldApplicationsAndGIDCollisions(t *testing.T) {
 			t.Fatal("changed PF before collision check", f.events)
 		}
 	}
-	f := &fakeSystem{snapshot: Snapshot{Sockets: []Socket{{UID: 501, GID: 62000}}}}
+	f := &fakeSystem{snapshot: Snapshot{Sockets: []Socket{testSocket()}}}
 	s := freshState()
 	if err := (Controller{System: f}).Start(context.Background(), &s); err == nil {
 		t.Fatal("inherited socket ownership accepted")
@@ -205,7 +212,7 @@ func TestReleaseRefusesHelpersUnknownIdentitiesAndPassedSocketHandles(t *testing
 	helper.Path = AppBundle + "/Contents/Frameworks/helper"
 	unknown := helper
 	unknown.Path = "/unknown/broker"
-	for _, snap := range []Snapshot{{Processes: []Identity{helper}}, {Processes: []Identity{unknown}}, {Sockets: []Socket{{UID: 501, GID: 62000, Handle: 9}}}, {Processes: []Identity{{Path: App, UID: 501, GID: 20}}}} {
+	for _, snap := range []Snapshot{{Processes: []Identity{helper}}, {Processes: []Identity{unknown}}, {Sockets: []Socket{testSocket()}}, {Processes: []Identity{{Path: App, UID: 501, GID: 20}}}} {
 		f := &fakeSystem{barrier: true, token: true, snapshot: snap}
 		s := activeState()
 		if err := (Controller{System: f}).Release(context.Background(), &s); err == nil {
@@ -241,7 +248,7 @@ func TestReleaseFailureRecoveryIsIdempotentAfterClear(t *testing.T) {
 }
 
 func TestClearCrashWithNewUnknownOwnerRefusesFurtherCleanup(t *testing.T) {
-	f := &fakeSystem{token: true, saved: activeState(), snapshot: Snapshot{Sockets: []Socket{{UID: 501, GID: 62000}}}}
+	f := &fakeSystem{token: true, saved: activeState(), snapshot: Snapshot{Sockets: []Socket{testSocket()}}}
 	s := activeState()
 	s.Phase = "releasing"
 	err := (Controller{System: f}).Release(context.Background(), &s)
@@ -250,6 +257,108 @@ func TestClearCrashWithNewUnknownOwnerRefusesFurtherCleanup(t *testing.T) {
 	}
 	if !f.token || f.removed {
 		t.Fatal("unknown owner allowed cleanup")
+	}
+}
+
+func TestSocketObservationCountsControlledHoldersAndRetainsTransferredObjects(t *testing.T) {
+	s := activeState()
+	controlled := testSocket()
+	f := &fakeSystem{barrier: true, token: true}
+	c := Controller{System: f}
+	if err := c.Observe(&s, Snapshot{Sockets: []Socket{controlled, controlled}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.SeenSockets) != 1 || len(f.events) != 1 {
+		t.Fatal("observed object not deduplicated or persisted", s.SeenSockets, f.events)
+	}
+	if err := c.Observe(&s, Snapshot{Sockets: []Socket{controlled}}); err != nil || len(f.events) != 1 {
+		t.Fatal("unchanged history rewritten", err, f.events)
+	}
+	counts, err := CountSockets(s, Snapshot{Sockets: []Socket{controlled, controlled}})
+	if err != nil || counts.Controlled != 1 || counts.Observed != 1 || counts.Remaining != 1 {
+		t.Fatal(counts, err)
+	}
+	transferred := controlled
+	transferred.Holder = Identity{PID: 999, Started: 500, UID: 500, GID: 20, RealGID: 20, SavedGID: 20}
+	f.snapshot = Snapshot{Sockets: []Socket{transferred}}
+	if err := c.Release(context.Background(), &s); err == nil || !f.barrier || !f.token || f.removed {
+		t.Fatal("observed descriptor transferred to another UID was released", err, f.events)
+	}
+	counts, err = CountSockets(s, f.snapshot)
+	if err != nil || counts.Controlled != 0 || counts.Observed != 1 || counts.Remaining != 1 {
+		t.Fatal(counts, err)
+	}
+	transferred.Key.Generation++
+	f.snapshot = Snapshot{Sockets: []Socket{transferred}}
+	if err := c.Release(context.Background(), &s); err != nil || !f.removed {
+		t.Fatal("reused opaque address with a new generation was treated as the original object", err)
+	}
+}
+
+func TestSocketHistorySaveFailureAndUnknownKeysHoldTheBarrier(t *testing.T) {
+	for _, failure := range []string{"save", "zero-handle", "zero-generation"} {
+		t.Run(failure, func(t *testing.T) {
+			s := activeState()
+			socket := testSocket()
+			f := &fakeSystem{barrier: true, token: true}
+			switch failure {
+			case "save":
+				f.fail = "save-active"
+			case "zero-handle":
+				socket.Key.Handle = 0
+			case "zero-generation":
+				socket.Key.Generation = 0
+			}
+			f.snapshot = Snapshot{Processes: []Identity{appIdentity(), proxyIdentity()}, Sockets: []Socket{socket}}
+			if err := (Controller{System: f}).Recover(context.Background(), &s); err == nil || s.Phase != "held" || !f.barrier || !f.token || f.removed {
+				t.Fatal("unrecorded or unknown observation lost the barrier", err, f.events)
+			}
+		})
+	}
+}
+
+func TestLegacyStateHasNoInventedSocketObservationHistory(t *testing.T) {
+	s := activeState()
+	s.SocketObservationStarted = false
+	f := &fakeSystem{barrier: true, token: true}
+	if err := (Controller{System: f}).Release(context.Background(), &s); err == nil || s.SocketObservationStarted || !f.barrier {
+		t.Fatal("legacy state was treated as observed", err)
+	}
+	s = activeState()
+	s.SeenSockets = []SocketKey{testSocket().Key, testSocket().Key}
+	if err := s.Validate(); err == nil {
+		t.Fatal("duplicate observed socket keys accepted")
+	}
+	s.SeenSockets = make([]SocketKey, 4097)
+	if err := s.Validate(); err == nil {
+		t.Fatal("unbounded observation history accepted")
+	}
+}
+
+func TestCompleteObservationPrunesClosedObjectsWithoutGrowingSessionHistory(t *testing.T) {
+	s := activeState()
+	for i := range 4096 {
+		key := testSocket().Key
+		key.Handle = uint64(i) + 1
+		s.SeenSockets = append(s.SeenSockets, key)
+	}
+	socket := testSocket()
+	socket.Key.Handle = 5000
+	f := &fakeSystem{}
+	c := Controller{System: f}
+	if err := c.Observe(&s, Snapshot{Sockets: []Socket{socket}}); err != nil || len(s.SeenSockets) != 1 || s.SeenSockets[0] != socket.Key {
+		t.Fatal("closed short connections exhausted the active set", len(s.SeenSockets), err)
+	}
+	if err := c.Observe(&s, Snapshot{Sockets: []Socket{socket}}); err != nil || len(f.events) != 1 {
+		t.Fatal("unchanged active set was rewritten", f.events, err)
+	}
+	broken := socket
+	broken.Key.Generation = 0
+	if _, err := CountSockets(s, Snapshot{Sockets: []Socket{broken}}); err == nil {
+		t.Fatal("read-only counts reported an incomplete observed object as absent")
+	}
+	if err := c.Observe(&s, Snapshot{Sockets: []Socket{broken}}); err == nil || len(s.SeenSockets) != 1 {
+		t.Fatal("an incomplete key silently pruned an observed object", err)
 	}
 }
 

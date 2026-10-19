@@ -60,7 +60,7 @@ func TestWiredPFLive(t *testing.T) {
 			break
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 	defer cancel()
 	store := Store{Path: Directory, Owner: 0}
 	unlock, err := store.Lock()
@@ -94,7 +94,7 @@ func TestWiredPFLive(t *testing.T) {
 	}
 	h := &livePFHarness{native: n, executable: executable, state: State{Version: 1, UID: account.UID, GID: gid, Wired: wired, Phase: "reserved"}}
 	// An ordinary failure unwinds through this function before unlocking.
-	// The external -test.timeout must exceed 35s plus the 15s cleanup budget.
+	// The external -test.timeout must exceed 50s plus the 15s cleanup budget.
 	defer func() {
 		cleanupCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
 		defer stop()
@@ -140,6 +140,15 @@ func TestWiredPFLive(t *testing.T) {
 			t.Log("root control echoed before and after; controlled nonce absent; deny packet/byte counters increased")
 		})
 	}
+	for _, network := range []string{"tcp4", "tcp6", "udp4", "udp6"} {
+		t.Run("in-"+network, func(t *testing.T) {
+			if err := h.blockedInboundNonce(ctx, network); err != nil {
+				t.Error(err)
+				return
+			}
+			t.Log("ordinary-GID client nonce absent at the dedicated-GID listener; IN deny counters increased; root control echoed before and after")
+		})
+	}
 	if err = h.listenerIdentity(ctx); err != nil {
 		t.Error(err)
 	}
@@ -173,6 +182,7 @@ type livePFResponse struct {
 	TCPBefore, TCPAfter    int
 	TCPInfoError           string
 	ExchangeError          string
+	Address                string
 }
 
 type livePFChild struct {
@@ -650,6 +660,122 @@ func (h *livePFHarness) blockedNonce(ctx context.Context, network string, sendto
 	return nil
 }
 
+func (h *livePFHarness) blockedInboundNonce(ctx context.Context, network string) error {
+	address := "127.0.0.1:0"
+	if strings.HasSuffix(network, "6") {
+		address = "[::1]:0"
+	}
+	controlEcho, err := liveNewEcho(network, address, nil)
+	if err != nil {
+		return err
+	}
+	h.closers = append(h.closers, controlEcho)
+	defer controlEcho.Close()
+	control, err := net.DialTimeout(network, controlEcho.address(), time.Second)
+	if err != nil {
+		return err
+	}
+	h.closers = append(h.closers, control)
+	defer control.Close()
+	if err = liveExchange(control, liveNonce()); err != nil {
+		return fmt.Errorf("root inbound control failed: %w", err)
+	}
+	if strings.HasPrefix(network, "tcp") {
+		if state, err := liveTCPState(control); err != nil || state != liveTCPEstablished {
+			return fmt.Errorf("inbound control TCP is not established: state=%d error=%v", state, err)
+		}
+	}
+	child, err := h.start(ctx, h.state.UID, h.state.GID, nil)
+	if err != nil {
+		return err
+	}
+	listener, err := child.request(ctx, livePFRequest{Op: "listen", Network: network, Address: address})
+	if err != nil {
+		return err
+	}
+	if !listener.Ready || liveLoopback(listener.Address) != nil {
+		return errors.New("dedicated-GID listener did not report a valid loopback address")
+	}
+	snap, err := h.native.Inspect(ctx, &h.state)
+	if err != nil {
+		return err
+	}
+	found := false
+	var listenerKey SocketKey
+	for _, socket := range snap.Sockets {
+		holder := socket.Holder
+		holder.Path = child.identity.Path
+		if SameProcess(holder, child.identity) && socket.Key.valid() {
+			found = true
+			listenerKey = socket.Key
+		}
+	}
+	if !found {
+		return errors.New("live libproc scan did not identify the exact listener helper's socket key")
+	}
+	if err = (Controller{System: h.native}).Observe(&h.state, snap); err != nil {
+		return err
+	}
+	stored, err := h.native.Store.Read()
+	if err != nil {
+		return err
+	}
+	persisted := false
+	for _, key := range stored.SeenSockets {
+		persisted = persisted || key == listenerKey
+	}
+	counts, err := CountSockets(stored, snap)
+	if err != nil || !stored.SocketObservationStarted || !persisted || counts.Controlled == 0 || counts.Observed == 0 {
+		return fmt.Errorf("live listener socket observation was not persisted: controlled=%d observed=%d error=%v", counts.Controlled, counts.Observed, err)
+	}
+	label := "wired-app-deny-" + network[:3] + "-in"
+	before, err := liveCounters(ctx, label)
+	if err != nil {
+		return err
+	}
+	nonce := liveNonce()
+	observation := livePFResponse{}
+	connection, dialErr := net.DialTimeout(network, listener.Address, 800*time.Millisecond)
+	if dialErr == nil {
+		h.closers = append(h.closers, connection)
+		observation.Connected = true
+		if strings.HasPrefix(network, "tcp") {
+			state, stateErr := liveTCPState(connection)
+			observation.TCPBefore, observation.TCPInfoError = state, errorText(stateErr)
+		}
+		exchangeErr := liveExchange(connection, nonce)
+		observation.Echo, observation.ExchangeError = exchangeErr == nil, errorText(exchangeErr)
+		if strings.HasPrefix(network, "tcp") {
+			state, stateErr := liveTCPState(connection)
+			observation.TCPAfter = state
+			if stateErr != nil {
+				observation.TCPInfoError = errorText(stateErr)
+			}
+		}
+		_ = connection.Close()
+	}
+	status, err := child.request(ctx, livePFRequest{Op: "status"})
+	if err != nil {
+		return err
+	}
+	after, err := liveCounters(ctx, label)
+	if err != nil {
+		return err
+	}
+	tcpConnected := observation.Connected && strings.HasPrefix(network, "tcp")
+	synBlocked := tcpConnected && observation.TCPBefore == liveTCPSynSent && observation.TCPAfter == liveTCPSynSent && observation.TCPInfoError == ""
+	if (tcpConnected && !synBlocked) || observation.Echo || status.Accepted != 0 || liveContains(status.Seen, nonce) || after.packets <= before.packets || after.bytes <= before.bytes {
+		return fmt.Errorf("inbound %s observation: dial_error=%v connected=%t echo=%t accepted=%d nonce_seen=%t state=%d->%d tcp_info_error=%q deny_packets=%d->%d deny_bytes=%d->%d", network, dialErr, observation.Connected, observation.Echo, status.Accepted, liveContains(status.Seen, nonce), observation.TCPBefore, observation.TCPAfter, observation.TCPInfoError, before.packets, after.packets, before.bytes, after.bytes)
+	}
+	if err = child.stop(ctx); err != nil {
+		return err
+	}
+	if err = liveExchange(control, liveNonce()); err != nil {
+		return fmt.Errorf("root inbound control failed after blocked attempt: %w", err)
+	}
+	return nil
+}
+
 func (h *livePFHarness) listenerIdentity(ctx context.Context) error {
 	listener, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", Port))
 	if err != nil {
@@ -787,6 +913,23 @@ func livePFHelper() error {
 		}
 		response := livePFResponse{}
 		switch request.Op {
+		case "listen":
+			if echo != nil || (request.Network != "tcp4" && request.Network != "tcp6" && request.Network != "udp4" && request.Network != "udp6") {
+				return errors.New("invalid dedicated listener request")
+			}
+			address := "127.0.0.1:0"
+			if strings.HasSuffix(request.Network, "6") {
+				address = "[::1]:0"
+			}
+			if request.Address != address {
+				return errors.New("dedicated listener must bind an ephemeral loopback port")
+			}
+			var err error
+			echo, err = liveNewEcho(request.Network, address, nil)
+			if err != nil {
+				return err
+			}
+			response.Ready, response.Address = true, echo.address()
 		case "dial", "sendto":
 			if request.Network != "tcp4" && request.Network != "tcp6" && request.Network != "udp4" && request.Network != "udp6" {
 				return errors.New("unrecognized helper network")

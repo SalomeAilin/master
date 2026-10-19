@@ -9,10 +9,19 @@ func safePF() PFSnapshot {
 	return PFSnapshot{Root: "anchor \"com.apple/*\" all\n", Interfaces: "en5\nlo0\nen1\n", Wired: "en5", NAT: "nat-anchor \"com.apple/*\" all\nrdr-anchor \"com.apple/*\" all\n", Filters: map[string]string{"com.apple": ""}, Translations: map[string]string{"com.apple": ""}}
 }
 
+func testRules(t *testing.T, s State) string {
+	t.Helper()
+	rules, err := Rules(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rules
+}
+
 func TestPFRequiresReachableExactPrivateAnchor(t *testing.T) {
 	p := safePF()
 	s := activeState()
-	rules := Rules(s.UID, s.GID)
+	rules := testRules(t, s)
 	if err := ValidatePF(p, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +83,7 @@ func TestPFRejectsStatesSkipsPassesAndTranslationBypasses(t *testing.T) {
 
 func TestLoadedRulesCannotAddAnAllowOrLoseCredentials(t *testing.T) {
 	s := activeState()
-	rules := Rules(s.UID, s.GID)
+	rules := testRules(t, s)
 	if err := ValidateLoadedRules(rules, s, "example"); err != nil {
 		t.Fatal(err)
 	}
@@ -102,19 +111,44 @@ func TestHardwarePortMustBeWired(t *testing.T) {
 	}
 }
 
-func TestMacOSCanonicalSevenRulesOmitFlagsAny(t *testing.T) {
+func TestMacOSCanonicalRulesOmitFlagsAny(t *testing.T) {
 	const canonical = `pass out quick on lo0 inet proto tcp from 127.0.0.1 to 127.0.0.1 port = 17891 user = 501 group = 62000 no state label "wired-app-loopback"
 pass in quick on lo0 inet proto tcp from 127.0.0.1 to 127.0.0.1 port = 17891 user = 0 group = 0 no state label "wired-app-root-listener"
 block drop in quick on lo0 inet proto tcp from 127.0.0.1 to 127.0.0.1 port = 17891 label "wired-app-deny-server"
 pass out quick on lo0 inet proto tcp from 127.0.0.1 port = 17891 to 127.0.0.1 user = 0 group = 0 no state label "wired-app-server-reply"
 pass in quick on lo0 inet proto tcp from 127.0.0.1 port = 17891 to 127.0.0.1 user = 501 group = 62000 no state label "wired-app-client-reply"
+pass out quick on en5 inet proto tcp all user = 501 group = 62000 no state label "wired-app-wired-tcp-out"
+pass in quick on en5 inet proto tcp all user = 501 group = 62000 no state label "wired-app-wired-tcp-in"
 block drop out quick proto tcp all user = 501 group = 62000 label "wired-app-deny-tcp"
 block drop out quick proto udp all user = 501 group = 62000 label "wired-app-deny-udp"
+block drop in quick proto tcp all user = 501 group = 62000 label "wired-app-deny-tcp-in"
+block drop in quick proto udp all user = 501 group = 62000 label "wired-app-deny-udp-in"
 `
 	if err := ValidateLoadedRules(canonical, activeState(), "example"); err != nil {
 		t.Fatal(err)
 	}
 	if err := ValidateLoadedRules(strings.Replace(canonical, "no state", "flags S/SA no state", 1), activeState(), "example"); err == nil {
 		t.Fatal("non-any TCP flags accepted")
+	}
+}
+
+func TestNativeTCPRulesRequireTheExactWiredInterfaceInBothDirectionsWithoutState(t *testing.T) {
+	s := activeState()
+	rules := testRules(t, s)
+	for _, bad := range []string{
+		strings.ReplaceAll(rules, "on en5 inet", "on en1 inet"),
+		strings.ReplaceAll(rules, "on en5 inet", "on en5 inet6"),
+		strings.ReplaceAll(rules, "on en5 inet", "on en5"),
+		strings.ReplaceAll(rules, "on en5 inet proto tcp", "on en5 inet proto udp"),
+		strings.ReplaceAll(rules, "no state label \"wired-app-wired", "keep state label \"wired-app-wired"),
+		strings.Replace(rules, "block drop in quick proto tcp", "pass in quick proto tcp", 1),
+	} {
+		if err := ValidateLoadedRules(bad, s, "example"); err == nil {
+			t.Fatal("broadened native TCP permission accepted", bad)
+		}
+	}
+	s.Wired = "en5\npass out all"
+	if _, err := Rules(s); err == nil {
+		t.Fatal("interface injection accepted")
 	}
 }

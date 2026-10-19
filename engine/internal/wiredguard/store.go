@@ -14,6 +14,8 @@ type Store struct {
 	Owner uint32
 }
 
+const stateSizeLimit = 1 << 20
+
 func (s Store) directory(create bool) error {
 	if create {
 		if err := os.Mkdir(s.Path, 0700); err != nil && !os.IsExist(err) {
@@ -46,7 +48,7 @@ func (s Store) open(name string) (*os.File, error) {
 		return nil, err
 	}
 	st := info.Sys().(*syscall.Stat_t)
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || st.Uid != s.Owner || st.Nlink != 1 || info.Size() > 16384 {
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || st.Uid != s.Owner || st.Nlink != 1 || info.Size() > stateSizeLimit {
 		f.Close()
 		return nil, errors.New("unsafe wired state file")
 	}
@@ -60,7 +62,7 @@ func (s Store) Read() (State, error) {
 		return state, err
 	}
 	defer f.Close()
-	d := json.NewDecoder(io.LimitReader(f, 16385))
+	d := json.NewDecoder(io.LimitReader(f, stateSizeLimit+1))
 	d.DisallowUnknownFields()
 	if err = d.Decode(&state); err != nil {
 		return state, err
@@ -86,6 +88,9 @@ func (s Store) Save(state State) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
+	}
+	if len(data)+1 > stateSizeLimit {
+		return errors.New("wired state exceeds size limit")
 	}
 	f, err := os.CreateTemp(s.Path, ".session-")
 	if err != nil {

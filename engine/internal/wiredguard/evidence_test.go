@@ -14,14 +14,32 @@ import (
 )
 
 func TestEvidenceRechecksIdentityAndBarrierAndPreservesRawSamples(t *testing.T) {
-	for _, failure := range []string{"", "before-identity", "before-barrier", "sample", "log", "after-identity", "after-barrier"} {
+	for _, failure := range []string{"", "before-identity", "before-barrier", "before-inspect", "before-labels", "before-label-limit", "sample", "log", "after-identity", "after-barrier", "after-inspect", "after-labels"} {
 		t.Run(failure, func(t *testing.T) {
 			state := activeState()
 			state.Cache = "/private/tmp/network-domain-wired-app.test"
 			identityCalls, barrierCalls, sampleCalls := 0, 0, 0
+			inspectCalls, labelCalls := 0, 0
 			const csv = "time,interface,bytes_in,bytes_out\nexternal,en7,100,20\nother,en8,1,2\n"
 			const log = "{\"event\":\"connected\",\"id\":1}\n"
 			operations := evidenceOperations{
+				inspect: func(context.Context, *State) (Snapshot, error) {
+					inspectCalls++
+					if (failure == "before-inspect" && inspectCalls == 1) || (failure == "after-inspect" && inspectCalls == 2) {
+						return Snapshot{}, errors.New("inspection unavailable")
+					}
+					return Snapshot{}, nil
+				},
+				labels: func(context.Context) (string, error) {
+					labelCalls++
+					if (failure == "before-labels" && labelCalls == 1) || (failure == "after-labels" && labelCalls == 2) {
+						return "", errors.New("counters unavailable")
+					}
+					if failure == "before-label-limit" {
+						return strings.Repeat("x", recentProxyLogLimit+1), nil
+					}
+					return "wired-app-wired-tcp-out 1 2 3 4 5 6 7\n", nil
+				},
 				identity: func(pid int) (Identity, error) {
 					identityCalls++
 					if pid != state.Proxy.PID {
@@ -67,7 +85,7 @@ func TestEvidenceRechecksIdentityAndBarrierAndPreservesRawSamples(t *testing.T) 
 			}
 			report, err := collectEvidence(context.Background(), state, operations)
 			if failure == "" {
-				if err != nil || report.NettopCSV != csv || report.RecentLog != log || !report.BarrierVerified || !report.ProxyIdentityVerified || report.Finished.Before(report.Started) {
+				if err != nil || report.NettopCSV != csv || report.RecentLog != log || !report.BarrierVerified || !report.ProxyIdentityVerified || report.Finished.Before(report.Started) || report.PFLabelsBefore == "" || report.PFLabelsAfter == "" || report.SocketCredentials == "" {
 					t.Fatal(report, err)
 				}
 			} else if err == nil || report.NettopCSV != "" || report.RecentLog != "" || report.BarrierVerified || report.ProxyIdentityVerified {
@@ -81,6 +99,84 @@ func TestEvidenceRechecksIdentityAndBarrierAndPreservesRawSamples(t *testing.T) 
 				t.Fatal("post-sample verification missing", sampleCalls, identityCalls, barrierCalls)
 			}
 		})
+	}
+}
+
+func TestEvidenceSamplesControlledHelpersAndReportsTheirLifecycle(t *testing.T) {
+	for _, change := range []string{"stable", "exit", "new-helper", "reused-pid"} {
+		t.Run(change, func(t *testing.T) {
+			s := activeState()
+			s.Cache = "/private/tmp/network-domain-wired-app.test"
+			app, helper := appIdentity(), appIdentity()
+			helper.PID, helper.Path = 31, AppBundle+"/Contents/Frameworks/baidunetdiskhost"
+			newHelper := helper
+			newHelper.PID = 32
+			inspectCalls := 0
+			operations := evidenceOperations{
+				verify: func(context.Context, State) error { return nil },
+				identity: func(pid int) (Identity, error) {
+					switch pid {
+					case s.Proxy.PID:
+						return *s.Proxy, nil
+					case app.PID:
+						return app, nil
+					case helper.PID:
+						if change == "exit" {
+							return Identity{}, os.ErrNotExist
+						}
+						current := helper
+						if change == "reused-pid" {
+							current.Started++
+						}
+						return current, nil
+					}
+					return Identity{}, errors.New("unexpected PID")
+				},
+				inspect: func(context.Context, *State) (Snapshot, error) {
+					inspectCalls++
+					processes := []Identity{app, helper, {PID: 99, Path: "/ordinary-app", UID: s.UID, GID: 20}}
+					if inspectCalls == 2 && change == "exit" {
+						processes = []Identity{app}
+					}
+					if inspectCalls == 2 && change == "new-helper" {
+						processes = append(processes, newHelper)
+					}
+					return Snapshot{Processes: processes}, nil
+				},
+				command: func(_ context.Context, input string, args ...string) (string, error) {
+					want := []string{"/usr/bin/nettop", "-n", "-x", "-p", "20", "-p", "30", "-p", "31", "-L", "3", "-s", "2"}
+					if input != "" || !slices.Equal(args, want) {
+						t.Fatal("helper sample is missing or includes an ordinary process", args)
+					}
+					return "raw multi-process CSV", nil
+				},
+				log:    func(string, uint32, uint32) (string, error) { return "raw log", nil },
+				labels: func(context.Context) (string, error) { return "raw labels", nil },
+			}
+			report, err := collectEvidence(context.Background(), s, operations)
+			if change == "reused-pid" {
+				if err == nil || report.BarrierVerified {
+					t.Fatal("reused helper PID accepted", report, err)
+				}
+				return
+			}
+			if err != nil || len(report.SampledProcesses) != 3 {
+				t.Fatal(report, err)
+			}
+			if report.ProcessSetStable != (change == "stable") || (change == "exit" && len(report.ExitedProcesses) != 1) || (change == "new-helper" && len(report.NewProcesses) != 1) {
+				t.Fatal("process lifecycle was not reported", report)
+			}
+		})
+	}
+	s := activeState()
+	var snap Snapshot
+	for i := range 64 {
+		p := appIdentity()
+		p.PID = i + 100
+		snap.Processes = append(snap.Processes, p)
+	}
+	if _, err := evidenceTargets(s, snap); err == nil {
+		t.Fatal("unbounded evidence targets accepted")
 	}
 }
 
