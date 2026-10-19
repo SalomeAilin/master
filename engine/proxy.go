@@ -419,14 +419,20 @@ func (e *engine) socks(ctx context.Context, client net.Conn) {
 func socksReply(client net.Conn, code byte) { client.Write([]byte{5, code, 0, 1, 0, 0, 0, 0, 0, 0}) }
 
 func startEngine(ctx context.Context, c Config, log *eventLog) error {
+	return startEngineListener(ctx, c, log, nil)
+}
+
+func startEngineListener(ctx context.Context, c Config, log *eventLog, listener net.Listener) error {
 	e, err := newEngine(c, log)
 	if err != nil {
 		return err
 	}
 	defer e.close()
-	listener, err := net.Listen("tcp4", c.Listen)
-	if err != nil {
-		return err
+	if listener == nil {
+		listener, err = net.Listen("tcp4", c.Listen)
+		if err != nil {
+			return err
+		}
 	}
 	defer listener.Close()
 	ctx, cancel := context.WithCancel(ctx)

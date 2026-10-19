@@ -24,6 +24,7 @@ import (
 	"network-owned-engine/internal/runtimecheck"
 	"network-owned-engine/internal/service"
 	"network-owned-engine/internal/statuspage"
+	"network-owned-engine/internal/wiredguard"
 )
 
 func applicationCommand(args []string) (bool, error) {
@@ -31,7 +32,7 @@ func applicationCommand(args []string) (bool, error) {
 		return false, nil
 	}
 	switch args[0] {
-	case "service", "worker", "prepare-service", "check-service", "config", "status", "evidence", "upgrade", "maintenance":
+	case "service", "worker", "prepare-service", "check-service", "config", "status", "evidence", "upgrade", "maintenance", "wired-app":
 	default:
 		return false, nil
 	}
@@ -39,6 +40,8 @@ func applicationCommand(args []string) (bool, error) {
 	defer cancel()
 	var err error
 	switch args[0] {
+	case "wired-app":
+		err = wiredguard.Run(ctx, args[1:])
 	case "evidence":
 		err = evidence.Run(args[1:])
 	case "upgrade":
@@ -50,6 +53,12 @@ func applicationCommand(args []string) (bool, error) {
 		if flags.NArg() > 1 {
 			return true, errors.New("usage: network-domain-engine upgrade [-native-dns] [service.json]")
 		}
+		var releaseWired func()
+		releaseWired, err = wiredguard.LockForUpgrade()
+		if err != nil {
+			return true, err
+		}
+		defer releaseWired()
 		config := service.ConfigPath
 		if flags.NArg() == 1 {
 			config = flags.Arg(0)
