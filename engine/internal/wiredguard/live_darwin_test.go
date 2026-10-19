@@ -131,9 +131,9 @@ func TestWiredPFLive(t *testing.T) {
 	}
 	t.Logf("live test owns GID %d, anchor %s; token/hash are durably recorded in %s/session.json", gid, Anchor, Directory)
 
-	for _, network := range []string{"tcp4", "tcp6", "udp4", "udp6"} {
+	for _, network := range []string{"tcp4", "tcp6", "udp4", "udp6", "udp4-sendto", "udp6-sendto"} {
 		t.Run(network, func(t *testing.T) {
-			if err := h.blockedNonce(ctx, network); err != nil {
+			if err := h.blockedNonce(ctx, strings.TrimSuffix(network, "-sendto"), strings.HasSuffix(network, "-sendto")); err != nil {
 				t.Error(err)
 				return
 			}
@@ -170,6 +170,9 @@ type livePFResponse struct {
 	Accepted               int
 	Seen                   []string
 	Error                  string
+	TCPBefore, TCPAfter    int
+	TCPInfoError           string
+	ExchangeError          string
 }
 
 type livePFChild struct {
@@ -407,6 +410,47 @@ func liveExchange(conn net.Conn, nonce string) error {
 	return nil
 }
 
+type liveUnconnectedUDP struct {
+	*net.UDPConn
+	peer *net.UDPAddr
+}
+
+func (conn *liveUnconnectedUDP) Write(data []byte) (int, error) {
+	return conn.UDPConn.WriteToUDP(data, conn.peer)
+}
+
+func liveUDPWithDestination(network, address string) (net.Conn, error) {
+	peer, err := net.ResolveUDPAddr(network, address)
+	if err != nil {
+		return nil, err
+	}
+	packet, err := net.ListenUDP(network, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &liveUnconnectedUDP{UDPConn: packet, peer: peer}, nil
+}
+
+func liveTCPState(conn net.Conn) (int, error) {
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		return -1, errors.New("not a TCP connection")
+	}
+	raw, err := tcp.SyscallConn()
+	if err != nil {
+		return -1, err
+	}
+	var info *unix.TCPConnectionInfo
+	var socketErr error
+	err = raw.Control(func(fd uintptr) {
+		info, socketErr = unix.GetsockoptTCPConnectionInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_CONNECTION_INFO)
+	})
+	if err = errors.Join(err, socketErr); err != nil {
+		return -1, err
+	}
+	return int(info.State), nil
+}
+
 type liveEcho struct {
 	listener net.Listener
 	packet   net.PacketConn
@@ -510,6 +554,11 @@ func (echo *liveEcho) Close() error {
 
 type liveLabel struct{ packets, bytes uint64 }
 
+// Darwin's TCP state values come from netinet/tcp_fsm.h. Check the kernel state,
+// server accepts, payload and deny counters instead of connect's return alone.
+const liveTCPSynSent = 2
+const liveTCPEstablished = 4
+
 func liveCounters(ctx context.Context, name string) (liveLabel, error) {
 	output, err := pf(ctx, "", "-a", Anchor, "-s", "labels")
 	if err != nil {
@@ -526,7 +575,7 @@ func liveCounters(ctx context.Context, name string) (liveLabel, error) {
 	return liveLabel{}, fmt.Errorf("counter label %s is absent or has an unexpected format", name)
 }
 
-func (h *livePFHarness) blockedNonce(ctx context.Context, network string) error {
+func (h *livePFHarness) blockedNonce(ctx context.Context, network string, sendto bool) error {
 	address := "127.0.0.1:0"
 	if strings.HasSuffix(network, "6") {
 		address = "[::1]:0"
@@ -537,7 +586,12 @@ func (h *livePFHarness) blockedNonce(ctx context.Context, network string) error 
 	}
 	h.closers = append(h.closers, echo)
 	defer echo.Close()
-	control, err := net.DialTimeout(network, echo.address(), time.Second)
+	var control net.Conn
+	if sendto {
+		control, err = liveUDPWithDestination(network, echo.address())
+	} else {
+		control, err = net.DialTimeout(network, echo.address(), time.Second)
+	}
 	if err != nil {
 		return err
 	}
@@ -546,6 +600,12 @@ func (h *livePFHarness) blockedNonce(ctx context.Context, network string) error 
 	if err = liveExchange(control, liveNonce()); err != nil {
 		return fmt.Errorf("root control echo failed: %w", err)
 	}
+	if strings.HasPrefix(network, "tcp") {
+		if state, err := liveTCPState(control); err != nil || state != liveTCPEstablished {
+			return fmt.Errorf("control TCP state is not established: state=%d error=%v", state, err)
+		}
+	}
+	acceptedBefore := echo.status().Accepted
 	label := "wired-app-deny-" + network[:3]
 	before, err := liveCounters(ctx, label)
 	if err != nil {
@@ -556,7 +616,11 @@ func (h *livePFHarness) blockedNonce(ctx context.Context, network string) error 
 		return err
 	}
 	nonce := liveNonce()
-	response, err := child.request(ctx, livePFRequest{Op: "dial", Network: network, Address: echo.address(), Nonce: nonce})
+	op := "dial"
+	if sendto {
+		op = "sendto"
+	}
+	response, err := child.request(ctx, livePFRequest{Op: op, Network: network, Address: echo.address(), Nonce: nonce})
 	if err != nil {
 		return err
 	}
@@ -572,8 +636,13 @@ func (h *livePFHarness) blockedNonce(ctx context.Context, network string) error 
 	if err != nil {
 		return err
 	}
-	if (response.Connected && strings.HasPrefix(network, "tcp")) || response.Echo || nonceSeen {
-		return fmt.Errorf("controlled connection was delivered: connected=%t echo=%t accepted=%d nonce_seen=%t deny_packets=%d->%d deny_bytes=%d->%d", response.Connected, response.Echo, status.Accepted, nonceSeen, before.packets, after.packets, before.bytes, after.bytes)
+	tcpReportedConnected := response.Connected && strings.HasPrefix(network, "tcp")
+	synStillBlocked := tcpReportedConnected && response.TCPBefore == liveTCPSynSent && response.TCPAfter == liveTCPSynSent && response.TCPInfoError == ""
+	if (tcpReportedConnected && !synStillBlocked) || response.Echo || nonceSeen || status.Accepted != acceptedBefore {
+		return fmt.Errorf("controlled connection observation: connected=%t echo=%t accepted=%d nonce_seen=%t tcp_state=%d->%d tcp_info_error=%q exchange_error=%q deny_packets=%d->%d deny_bytes=%d->%d", response.Connected, response.Echo, status.Accepted, nonceSeen, response.TCPBefore, response.TCPAfter, response.TCPInfoError, response.ExchangeError, before.packets, after.packets, before.bytes, after.bytes)
+	}
+	if synStillBlocked {
+		fmt.Printf("%s connect observation: API returned success; kernel state=%d->%d (SYN_SENT), no new server accept, no nonce, deny packets=%d->%d\n", network, response.TCPBefore, response.TCPAfter, before.packets, after.packets)
 	}
 	if after.packets <= before.packets || after.bytes <= before.bytes {
 		return errors.New("deny packet and byte counters did not increase")
@@ -718,17 +787,38 @@ func livePFHelper() error {
 		}
 		response := livePFResponse{}
 		switch request.Op {
-		case "dial":
+		case "dial", "sendto":
 			if request.Network != "tcp4" && request.Network != "tcp6" && request.Network != "udp4" && request.Network != "udp6" {
 				return errors.New("unrecognized helper network")
 			}
 			if err := liveLoopback(request.Address); err != nil {
 				return err
 			}
-			conn, err := net.DialTimeout(request.Network, request.Address, 800*time.Millisecond)
+			var conn net.Conn
+			var err error
+			if request.Op == "sendto" {
+				if !strings.HasPrefix(request.Network, "udp") {
+					return errors.New("sendto helper requires UDP")
+				}
+				conn, err = liveUDPWithDestination(request.Network, request.Address)
+			} else {
+				conn, err = net.DialTimeout(request.Network, request.Address, 800*time.Millisecond)
+			}
 			if err == nil {
 				response.Connected = true
-				response.Echo = liveExchange(conn, request.Nonce) == nil
+				if strings.HasPrefix(request.Network, "tcp") {
+					state, stateErr := liveTCPState(conn)
+					response.TCPBefore, response.TCPInfoError = state, errorText(stateErr)
+				}
+				exchangeErr := liveExchange(conn, request.Nonce)
+				response.Echo, response.ExchangeError = exchangeErr == nil, errorText(exchangeErr)
+				if strings.HasPrefix(request.Network, "tcp") {
+					state, stateErr := liveTCPState(conn)
+					response.TCPAfter = state
+					if stateErr != nil {
+						response.TCPInfoError = errorText(stateErr)
+					}
+				}
 				_ = conn.Close()
 			}
 			// A dial/read failure is an observation; only the parent listener
