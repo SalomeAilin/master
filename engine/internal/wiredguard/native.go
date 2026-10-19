@@ -229,7 +229,10 @@ func (n *Native) Preflight(ctx context.Context, s *State) error {
 	}
 	p.Wired = wired
 	if s == nil {
-		return ValidatePF(p, "")
+		if err := ValidatePF(p, ""); err != nil {
+			return fmt.Errorf("%w; live PF main filter: %q", err, p.Root)
+		}
+		return nil
 	}
 	actual := p.Filters[Anchor]
 	if actual == "" || Digest(actual) != s.RuleHash {

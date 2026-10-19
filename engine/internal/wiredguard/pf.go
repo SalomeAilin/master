@@ -20,6 +20,11 @@ func ValidatePF(p PFSnapshot, ownRules string) error {
 		return errors.New("private PF anchor is missing from the reachable anchor inventory")
 	}
 	root := nonemptyLines(p.Root)
+	// macOS includes its normalization anchor in `pfctl -sr`, before the
+	// filter anchor. Accept that exact Apple rule without changing it.
+	if len(root) == 2 && compact(root[0]) == "scrub-anchor com.apple/* all fragment reassemble" {
+		root = root[1:]
+	}
 	if len(root) != 1 || compact(root[0]) != "anchor com.apple/* all" {
 		return errors.New("PF main filter must contain only the existing com.apple/* anchor; refusing to replace global rules")
 	}

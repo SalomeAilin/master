@@ -29,6 +29,24 @@ func TestPFRequiresReachableExactPrivateAnchor(t *testing.T) {
 	}
 }
 
+func TestPFAllowsOnlyTheStandardAppleNormalizationAnchor(t *testing.T) {
+	p := safePF()
+	p.Root = "scrub-anchor \"com.apple/*\" all fragment reassemble\n" + p.Root
+	if err := ValidatePF(p, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{
+		"scrub all fragment reassemble\nanchor \"com.apple/*\" all\n",
+		"scrub-anchor \"other/*\" all fragment reassemble\nanchor \"com.apple/*\" all\n",
+		p.Root + "anchor \"com.apple/*\" all\n",
+	} {
+		p.Root = root
+		if err := ValidatePF(p, ""); err == nil {
+			t.Fatal("unrecognized normalization or extra filters accepted", root)
+		}
+	}
+}
+
 func TestPFRejectsStatesSkipsPassesAndTranslationBypasses(t *testing.T) {
 	for name, mutate := range map[string]func(*PFSnapshot){
 		"floating state":              func(p *PFSnapshot) { p.States = "all tcp 192.0.2.1:50000 -> 198.51.100.1:443 ESTABLISHED:ESTABLISHED" },
