@@ -13,14 +13,15 @@ import (
 
 func Run(ctx context.Context, args []string) error {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Println("wired-app: plan | preflight | start | status | evidence | recover | release [-uid <existing-user-id>]")
+		fmt.Println("wired-app: plan | preflight | open | start | status | evidence | recover | release [-uid <existing-user-id>]")
 		fmt.Println("start requires the installed engine, administrator authorization, and all existing Baidu processes closed. No daemon is installed.")
+		fmt.Println("open reuses a verified session for the same user or starts a new foreground session. Direct application launches are not covered.")
 		fmt.Println("evidence samples the proxy and controlled app processes three times, with private PF counters and recent proxy logs in JSON.")
 		return nil
 	}
 	action := args[0]
 	switch action {
-	case "plan", "preflight", "start", "status", "evidence", "recover", "release", "_launch":
+	case "plan", "preflight", "open", "start", "status", "evidence", "recover", "release", "_launch":
 	default:
 		return errors.New("unknown wired-app action")
 	}
@@ -91,6 +92,16 @@ func Run(ctx context.Context, args []string) error {
 		if err := RequireInstalled(); err != nil {
 			return err
 		}
+	}
+	if action == "open" {
+		state, readErr := store.Read()
+		if readErr == nil {
+			return reuseSession(ctx, store, state, uint32(*uid))
+		}
+		if !os.IsNotExist(readErr) {
+			return readErr
+		}
+		action = "start"
 	}
 	if action == "_launch" {
 		state, err := store.Read()

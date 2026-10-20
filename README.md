@@ -23,8 +23,13 @@
 ```sh
 /usr/local/libexec/network-domain-engine wired-app plan
 sudo /usr/local/libexec/network-domain-engine wired-app preflight -uid "$(id -u)"
+sudo /usr/local/libexec/network-domain-engine wired-app open -uid "$(id -u)"
 sudo /usr/local/libexec/network-domain-engine wired-app start -uid "$(id -u)"
 ```
+
+`open` 是日常受保护入口：没有会话时按 `start` 的顺序先建立 PF，再打开网盘；已有同用户的活动会话时，核对进程身份、PF、代理响应和持锁 Go 进程后复用，不再创建控制器或代理。检查不完整或发现普通实例就拒绝，不会退回普通启动。原始 `start` 继续要求没有会话。
+
+本地“百度网盘·有线保护”入口只通过系统授权调用已安装 Go 的 `open`，冷启动仍可能要求认证。入口在后台等待会话结束，收尾由 Go 管理；重复点击正在等待的入口不保证再次核验或切换窗口。它只覆盖经此入口创建的会话；直接打开原网盘、原登录项及独立更新器重启仍可能绕过。自动保护入口不等于对原应用所有启动方式的系统级拦截。
 
 部署仍按下文的管理员授权流程进行；上述命令只有在更新原 Go 程序后才可用。`preflight` 只读检查。开始前须明确同意退出、重启百度网盘，并先关闭现有主程序及下载 helper；程序发现旧实例会拒绝运行，不自行结束用户应用。只支持 `/Applications/BaiduNetdisk.app` 的原始签名程序，应用仍以原 UID 运行，将主 GID 换成未占用的会话 GID，保留原补充组。旧主组不会自动成为额外补充组，不修改系统组数据库或组上限。
 
