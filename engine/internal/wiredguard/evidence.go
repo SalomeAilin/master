@@ -16,21 +16,23 @@ import (
 const recentProxyLogLimit = 128 << 10
 
 type evidenceReport struct {
-	State                 State      `json:"state"`
-	Started               time.Time  `json:"sample_started_at"`
-	Finished              time.Time  `json:"sample_finished_at"`
-	NettopCSV             string     `json:"nettop_csv"`
-	RecentLog             string     `json:"recent_proxy_log"`
-	BarrierVerified       bool       `json:"barrier_verified_before_and_after"`
-	ProxyIdentityVerified bool       `json:"proxy_identity_verified_before_and_after"`
-	SampledProcesses      []Identity `json:"sampled_processes"`
-	ExitedProcesses       []Identity `json:"exited_sampled_processes,omitempty"`
-	NewProcesses          []Identity `json:"new_controlled_processes_not_sampled,omitempty"`
-	ProcessSetStable      bool       `json:"sampled_process_set_stable"`
-	PFLabelsBefore        string     `json:"pf_labels_before"`
-	PFLabelsAfter         string     `json:"pf_labels_after"`
-	SocketCredentials     string     `json:"original_socket_credentials"`
-	ObservationPersisted  bool       `json:"socket_observation_persisted"`
+	State                 State            `json:"state"`
+	Started               time.Time        `json:"sample_started_at"`
+	Finished              time.Time        `json:"sample_finished_at"`
+	NettopCSV             string           `json:"nettop_csv"`
+	RecentLog             string           `json:"recent_proxy_log"`
+	BarrierVerified       bool             `json:"barrier_verified_before_and_after"`
+	ProxyIdentityVerified bool             `json:"proxy_identity_verified_before_and_after"`
+	SampledProcesses      []Identity       `json:"sampled_processes"`
+	ExitedProcesses       []Identity       `json:"exited_sampled_processes,omitempty"`
+	NewProcesses          []Identity       `json:"new_controlled_processes_not_sampled,omitempty"`
+	ProcessSetStable      bool             `json:"sampled_process_set_stable"`
+	PFLabelsBefore        string           `json:"pf_labels_before"`
+	PFLabelsAfter         string           `json:"pf_labels_after"`
+	SocketCredentials     string           `json:"original_socket_credentials"`
+	ObservationPersisted  bool             `json:"socket_observation_persisted"`
+	UnresolvedBefore      []UnresolvedPath `json:"unresolved_paths_before,omitempty"`
+	UnresolvedAfter       []UnresolvedPath `json:"unresolved_paths_after,omitempty"`
 }
 
 type evidenceOperations struct {
@@ -147,6 +149,7 @@ func collectEvidence(ctx context.Context, s State, operations evidenceOperations
 	report.SampledProcesses, report.PFLabelsBefore, report.PFLabelsAfter = targets, labelsBefore, labelsAfter
 	report.ProcessSetStable = len(report.ExitedProcesses) == 0 && len(report.NewProcesses) == 0
 	report.SocketCredentials, report.ObservationPersisted = "unknown: libproc does not expose so_cred", s.SocketObservationStarted
+	report.UnresolvedBefore, report.UnresolvedAfter = before.UnresolvedPaths, after.UnresolvedPaths
 	return report, nil
 }
 

@@ -85,7 +85,7 @@ func Run(ctx context.Context, args []string) error {
 		processes, sockets, ownerErr := Ownership(state, snap)
 		counts, countErr := CountSockets(state, snap)
 		verifyErr := native.Verify(ctx, state)
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"state": state, "controlled_processes": processes, "remaining_socket_objects": sockets, "controlled_holder_socket_objects": counts.Controlled, "seen_socket_objects_still_held": counts.Observed, "socket_observation_persisted": state.SocketObservationStarted, "status_observation_saved": false, "original_socket_credentials": "unknown: libproc does not expose so_cred", "barrier_verified": verifyErr == nil, "inspection_error": errorText(errors.Join(inspectErr, ownerErr, countErr, verifyErr)), "physical_disconnect_verified": false, "boundary": "ordinary-GID external brokers and socket transfers never observed by the controller are outside this session"})
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"state": state, "controlled_processes": processes, "remaining_socket_objects": sockets, "controlled_holder_socket_objects": counts.Controlled, "seen_socket_objects_still_held": counts.Observed, "socket_observation_persisted": state.SocketObservationStarted, "status_observation_saved": false, "original_socket_credentials": "unknown: libproc does not expose so_cred", "unresolved_paths": snap.UnresolvedPaths, "barrier_verified": verifyErr == nil, "inspection_error": errorText(errors.Join(inspectErr, ownerErr, countErr, verifyErr)), "physical_disconnect_verified": false, "boundary": "ordinary-GID external brokers and socket transfers never observed by the controller are outside this session"})
 	}
 	if action != "preflight" {
 		if err := RequireInstalled(); err != nil {
@@ -135,7 +135,7 @@ func Run(ctx context.Context, args []string) error {
 		if err = native.Preflight(ctx, nil); err != nil {
 			return err
 		}
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"preflight": "passed", "uid": account.UID, "candidate_gid": gid, "system_changed": false, "live_disconnect_test": "not_run"})
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"preflight": "passed", "uid": account.UID, "candidate_gid": gid, "unresolved_paths": snap.UnresolvedPaths, "system_changed": false, "live_disconnect_test": "not_run"})
 	}
 	release, err := store.Lock()
 	if err != nil {
@@ -172,7 +172,7 @@ func Run(ctx context.Context, args []string) error {
 		if err = controller.Start(ctx, &state); err != nil {
 			return err
 		}
-		if err = json.NewEncoder(os.Stdout).Encode(map[string]any{"session": "started", "state": state, "download_verified": false, "instruction": "set Baidu's HTTP proxy to 127.0.0.1:17891; verify controlled helpers and an actual download before claiming wired-only operation"}); err != nil {
+		if err = json.NewEncoder(os.Stdout).Encode(map[string]any{"session": "started", "state": state, "unresolved_paths": native.lastUnresolvedPaths, "download_verified": false, "instruction": "set Baidu's HTTP proxy to 127.0.0.1:17891; verify controlled helpers and an actual download before claiming wired-only operation"}); err != nil {
 			return err
 		}
 		for {

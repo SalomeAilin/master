@@ -53,8 +53,9 @@ type Socket struct {
 	Holder Identity
 }
 type Snapshot struct {
-	Processes []Identity
-	Sockets   []Socket
+	Processes       []Identity
+	Sockets         []Socket
+	UnresolvedPaths []UnresolvedPath
 }
 type Account struct {
 	UID, GID   uint32

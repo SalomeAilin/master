@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -103,7 +104,7 @@ func TestEvidenceRechecksIdentityAndBarrierAndPreservesRawSamples(t *testing.T) 
 }
 
 func TestEvidenceSamplesControlledHelpersAndReportsTheirLifecycle(t *testing.T) {
-	for _, change := range []string{"stable", "exit", "new-helper", "reused-pid"} {
+	for _, change := range []string{"stable", "exit", "new-helper", "reused-pid", "missing-path"} {
 		t.Run(change, func(t *testing.T) {
 			s := activeState()
 			s.Cache = "/private/tmp/network-domain-wired-app.test"
@@ -124,6 +125,9 @@ func TestEvidenceSamplesControlledHelpersAndReportsTheirLifecycle(t *testing.T) 
 						if change == "exit" {
 							return Identity{}, os.ErrNotExist
 						}
+						if change == "missing-path" {
+							return Identity{}, &pathUnavailableError{PID: pid, Err: syscall.ENOENT}
+						}
 						current := helper
 						if change == "reused-pid" {
 							current.Started++
@@ -141,7 +145,7 @@ func TestEvidenceSamplesControlledHelpersAndReportsTheirLifecycle(t *testing.T) 
 					if inspectCalls == 2 && change == "new-helper" {
 						processes = append(processes, newHelper)
 					}
-					return Snapshot{Processes: processes}, nil
+					return Snapshot{Processes: processes, UnresolvedPaths: []UnresolvedPath{{Process: ordinaryKernelProcess().Identity, KernelName: "ordinary-helper", Reason: "executable classification is unknown"}}}, nil
 				},
 				command: func(_ context.Context, input string, args ...string) (string, error) {
 					want := []string{"/usr/bin/nettop", "-n", "-x", "-p", "20", "-p", "30", "-p", "31", "-L", "3", "-s", "2"}
@@ -154,14 +158,20 @@ func TestEvidenceSamplesControlledHelpersAndReportsTheirLifecycle(t *testing.T) 
 				labels: func(context.Context) (string, error) { return "raw labels", nil },
 			}
 			report, err := collectEvidence(context.Background(), s, operations)
-			if change == "reused-pid" {
+			if change == "reused-pid" || change == "missing-path" {
 				if err == nil || report.BarrierVerified {
-					t.Fatal("reused helper PID accepted", report, err)
+					t.Fatal("reused PID or unresolved controlled process path accepted", report, err)
+				}
+				if change == "missing-path" && len(report.ExitedProcesses) != 0 {
+					t.Fatal("live controlled process with unavailable path reported as exited", report)
 				}
 				return
 			}
 			if err != nil || len(report.SampledProcesses) != 3 {
 				t.Fatal(report, err)
+			}
+			if len(report.UnresolvedBefore) != 1 || len(report.UnresolvedAfter) != 1 || report.UnresolvedBefore[0].Process.Path != "" {
+				t.Fatal("ordinary unknown path diagnostics were lost", report)
 			}
 			if report.ProcessSetStable != (change == "stable") || (change == "exit" && len(report.ExitedProcesses) != 1) || (change == "new-helper" && len(report.NewProcesses) != 1) {
 				t.Fatal("process lifecycle was not reported", report)

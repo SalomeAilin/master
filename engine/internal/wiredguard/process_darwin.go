@@ -54,88 +54,64 @@ import "C"
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
-	"strings"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
-func nativeSnapshot(ctx context.Context, uid uint32) (Snapshot, error) {
-	var result Snapshot
+func nativeSnapshot(ctx context.Context, uid uint32, state *State) (Snapshot, error) {
+	return processSnapshot(ctx, uid, state, snapshotOperations{list: nativeProcessList, identity: nativeIdentity, sockets: nativeSockets, current: nativeProcess, gone: gone})
+}
+
+func nativeProcessList() ([]kernelProcess, error) {
 	processes, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
-		return result, err
+		return nil, err
 	}
 	if len(processes) > 32768 {
-		return result, errors.New("process inventory exceeds limit")
+		return nil, errors.New("process inventory exceeds limit")
 	}
+	result := make([]kernelProcess, 0, len(processes))
 	for _, p := range processes {
-		if err = ctx.Err(); err != nil {
-			return result, err
-		}
-		pid := int(p.Proc.P_pid)
-		if pid <= 0 || p.Proc.P_stat == 5 {
-			continue
-		} // zombies have no open descriptors
-		holder := processCredentials(p)
-		if p.Eproc.Ucred.Uid != uid {
-			nameBytes := make([]byte, 0, len(p.Proc.P_comm))
-			for _, c := range p.Proc.P_comm {
-				if c == 0 {
-					break
-				}
-				nameBytes = append(nameBytes, byte(c))
-			}
-			name := strings.ToLower(string(nameBytes))
-			gid := p.Eproc.Ucred.Groups[0]
-			if (gid >= 62000 && gid <= 62127) || (p.Eproc.Pcred.P_rgid >= 62000 && p.Eproc.Pcred.P_rgid <= 62127) || (p.Eproc.Pcred.P_svgid >= 62000 && p.Eproc.Pcred.P_svgid <= 62127) || strings.Contains(name, "baidu") || strings.Contains(name, "netdisk") {
-				identity, err := nativeIdentity(pid)
-				if err != nil {
-					if os.IsNotExist(err) {
-						continue
-					}
-					return result, err
-				}
-				result.Processes = append(result.Processes, identity)
-			}
-		} else {
-			identity, err := nativeIdentity(pid)
-			if err != nil {
-				if os.IsNotExist(err) {
-					continue
-				}
-				return result, err
-			}
-			result.Processes = append(result.Processes, identity)
-		}
-		// Search every process for previously observed keys after descriptor
-		// transfer. libproc's soi_stat fields do not expose socket credentials.
-		var sockets [4096]C.struct_wired_socket
-		count, callErr := C.wired_sockets(C.int(pid), &sockets[0], C.int(len(sockets)))
-		if count < 0 {
-			if gone(pid) {
-				continue
-			}
-			return result, fmt.Errorf("cannot inspect socket ownership for process %d: %v", pid, callErr)
-		}
-		for i := 0; i < int(count); i++ {
-			result.Sockets = append(result.Sockets, Socket{Holder: holder, Key: SocketKey{Handle: uint64(sockets[i].handle), PCB: uint64(sockets[i].pcb), Generation: uint64(sockets[i].generation), Family: int(sockets[i].family), Protocol: int(sockets[i].protocol)}})
-		}
-		current, e := unix.SysctlKinfoProc("kern.proc.pid", pid)
-		if e == nil && processCredentials(*current) != holder {
-			return result, errors.New("process identity changed during socket scan")
-		}
-		if e != nil && !gone(pid) {
-			return result, e
-		}
-		if len(result.Sockets) > 65536 {
-			return result, errors.New("socket inventory exceeds limit")
-		}
+		result = append(result, kernelIdentity(p))
 	}
 	return result, nil
+}
+
+func nativeProcess(pid int) (kernelProcess, error) {
+	p, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		return kernelProcess{}, err
+	}
+	return kernelIdentity(*p), nil
+}
+
+func kernelIdentity(p unix.KinfoProc) kernelProcess {
+	name := make([]byte, 0, len(p.Proc.P_comm))
+	for _, c := range p.Proc.P_comm {
+		if c == 0 {
+			break
+		}
+		name = append(name, byte(c))
+	}
+	return kernelProcess{Identity: processCredentials(p), Comm: string(name), Zombie: p.Proc.P_stat == 5}
+}
+
+func nativeSockets(pid int) ([]SocketKey, error) {
+	var sockets [4096]C.struct_wired_socket
+	count, err := C.wired_sockets(C.int(pid), &sockets[0], C.int(len(sockets)))
+	if count < 0 {
+		if err == nil {
+			err = errors.New("libproc returned an incomplete socket inventory")
+		}
+		return nil, err
+	}
+	keys := make([]SocketKey, 0, int(count))
+	for i := 0; i < int(count); i++ {
+		keys = append(keys, SocketKey{Handle: uint64(sockets[i].handle), PCB: uint64(sockets[i].pcb), Generation: uint64(sockets[i].generation), Family: int(sockets[i].family), Protocol: int(sockets[i].protocol)})
+	}
+	return keys, nil
 }
 
 func processCredentials(p unix.KinfoProc) Identity {
@@ -148,25 +124,17 @@ func gone(pid int) bool {
 }
 
 func nativeIdentity(pid int) (Identity, error) {
-	p, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-	if err != nil {
-		if gone(pid) {
-			return Identity{}, os.ErrNotExist
-		}
-		return Identity{}, err
-	}
-	if p.Proc.P_stat == 5 {
-		return Identity{}, os.ErrNotExist
-	}
+	return readProcessIdentity(pid, nativeProcess, nativeProcessPath, gone)
+}
+
+func nativeProcessPath(pid int) (string, error) {
 	var path [4096]C.char
 	n, err := C.proc_pidpath(C.int(pid), unsafe.Pointer(&path[0]), C.uint32_t(len(path)))
 	if n <= 0 {
-		if gone(pid) {
-			return Identity{}, os.ErrNotExist
+		if err == nil {
+			err = errors.New("proc_pidpath returned no executable path")
 		}
-		return Identity{}, fmt.Errorf("cannot identify process %d: %v", pid, err)
+		return "", err
 	}
-	identity := processCredentials(*p)
-	identity.Path = C.GoString(&path[0])
-	return identity, nil
+	return C.GoString(&path[0]), nil
 }

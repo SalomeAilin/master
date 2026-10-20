@@ -7,7 +7,7 @@ import (
 	"errors"
 )
 
-func nativeSnapshot(context.Context, uint32) (Snapshot, error) {
+func nativeSnapshot(context.Context, uint32, *State) (Snapshot, error) {
 	return Snapshot{}, errors.New("wired-app requires a CGO-enabled macOS build for process and socket ownership")
 }
 

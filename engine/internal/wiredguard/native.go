@@ -22,9 +22,10 @@ import (
 )
 
 type Native struct {
-	Store    Store
-	Account  Account
-	Listener net.Listener
+	Store               Store
+	Account             Account
+	Listener            net.Listener
+	lastUnresolvedPaths []UnresolvedPath
 }
 
 // App Store binaries carry Apple's leaf certificate; their publisher is in
@@ -83,26 +84,26 @@ func accountGroups(primary uint32, groups []string) ([]uint32, error) {
 }
 
 func (n *Native) Inspect(ctx context.Context, s *State) (Snapshot, error) {
-	snap, err := nativeSnapshot(ctx, n.Account.UID)
+	snap, err := nativeSnapshot(ctx, n.Account.UID, s)
 	if err != nil {
 		return snap, err
 	}
-	if s != nil && s.Proxy != nil {
-		p, e := nativeIdentity(s.Proxy.PID)
-		if e == nil {
-			snap.Processes = append(snap.Processes, p)
-		} else if !os.IsNotExist(e) {
-			return snap, e
+	if s != nil {
+		for _, known := range []*Identity{s.App, s.Proxy, s.Launcher} {
+			if known == nil {
+				continue
+			}
+			p, e := nativeIdentity(known.PID)
+			if e == nil {
+				if !slices.ContainsFunc(snap.Processes, func(existing Identity) bool { return SameProcess(existing, p) }) {
+					snap.Processes = append(snap.Processes, p)
+				}
+			} else if !os.IsNotExist(e) {
+				return snap, e
+			}
 		}
 	}
-	if s != nil && s.Launcher != nil {
-		p, e := nativeIdentity(s.Launcher.PID)
-		if e == nil {
-			snap.Processes = append(snap.Processes, p)
-		} else if !os.IsNotExist(e) {
-			return snap, e
-		}
-	}
+	n.lastUnresolvedPaths = snap.UnresolvedPaths
 	return snap, nil
 }
 func (n *Native) Save(s State) error { return n.Store.Save(s) }
