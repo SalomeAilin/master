@@ -228,8 +228,42 @@ func TestExitRaceRestartsWholeInventoryAndDiscardsPartialSnapshot(t *testing.T) 
 	}
 }
 
+func TestPathExitRaceRestartsWholeInventoryAndDiscardsPartialSnapshot(t *testing.T) {
+	first, second := ordinaryKernelProcess(), ordinaryKernelProcess()
+	second.Identity.PID = 81
+	operations := completeScanOperations(first, second)
+	lists, scanned := 0, []int{}
+	operations.list = func() ([]kernelProcess, error) { lists++; return []kernelProcess{first, second}, nil }
+	identity := operations.identity
+	operations.identity = func(pid int) (Identity, error) {
+		if lists == 1 && pid == second.Identity.PID {
+			return Identity{}, &pathUnavailableError{PID: pid, Err: syscall.ESRCH}
+		}
+		return identity(pid)
+	}
+	operations.sockets = func(pid int) ([]SocketKey, error) {
+		scanned = append(scanned, pid)
+		key := testSocket().Key
+		key.Handle, key.Generation = uint64(pid), uint64(lists)
+		return []SocketKey{key}, nil
+	}
+	snap, err := completeProcessSnapshot(context.Background(), 501, nil, operations)
+	if err != nil || lists != 2 || !slices.Equal(scanned, []int{80, 80, 81}) || len(snap.Processes) != 2 || len(snap.Sockets) != 2 {
+		t.Fatal("path exit retry did not repeat the complete inventory", snap, lists, scanned, err)
+	}
+	for _, socket := range snap.Sockets {
+		if socket.Key.Generation != 2 {
+			t.Fatal("partial path observation leaked into the complete result", snap)
+		}
+	}
+}
+
 func TestSnapshotRetryIsBoundedAndDoesNotHideOtherErrors(t *testing.T) {
-	for _, failure := range []error{syscall.ESRCH, syscall.EPERM, syscall.EIO, syscall.EAGAIN, &pathUnavailableError{PID: 80, Err: syscall.ESRCH}} {
+	pathExit := &pathUnavailableError{PID: 80, Err: syscall.ESRCH}
+	for _, failure := range []error{syscall.ESRCH, syscall.EPERM, syscall.EIO, syscall.EAGAIN, pathExit,
+		&pathUnavailableError{PID: 80, Err: syscall.ENOENT},
+		&pathUnavailableError{PID: 80, Err: syscall.EPERM},
+		&pathUnavailableError{PID: 80, Err: fmt.Errorf("wrapped: %w", syscall.ESRCH)}} {
 		t.Run(failure.Error(), func(t *testing.T) {
 			first, second := ordinaryKernelProcess(), ordinaryKernelProcess()
 			second.Identity.PID, second.Identity.UID = 81, 502
@@ -244,7 +278,7 @@ func TestSnapshotRetryIsBoundedAndDoesNotHideOtherErrors(t *testing.T) {
 			}
 			snap, err := completeProcessSnapshot(context.Background(), 501, nil, operations)
 			want := 1
-			if failure == syscall.ESRCH {
+			if failure == syscall.ESRCH || failure == pathExit {
 				want = 2
 			}
 			if err == nil || lists != want || len(snap.Processes) != 0 || len(snap.Sockets) != 0 || len(snap.UnresolvedPaths) != 0 {

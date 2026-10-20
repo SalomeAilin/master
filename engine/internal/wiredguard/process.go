@@ -98,7 +98,16 @@ func completeProcessSnapshot(ctx context.Context, uid uint32, state *State, oper
 		if err == nil {
 			return snap, nil
 		}
-		if attempt == 1 || !errors.Is(err, syscall.ESRCH) {
+		retryExit := errors.Is(err, syscall.ESRCH)
+		var unavailable *pathUnavailableError
+		if errors.As(err, &unavailable) {
+			// Keep unavailable paths distinct from confirmed exits. Only this
+			// exact errno permits another complete scan, never a skipped process.
+			if errno, ok := unavailable.Err.(syscall.Errno); ok && errno == syscall.ESRCH {
+				retryExit = true
+			}
+		}
+		if attempt == 1 || !retryExit {
 			return Snapshot{}, err
 		}
 	}
