@@ -149,3 +149,120 @@ func TestMissingPathRequiresStableFreshClassificationAndCompleteFDScan(t *testin
 		t.Fatal("path fallback hid an incomplete descriptor scan", err)
 	}
 }
+
+func TestGoneRequiresConfirmedAbsenceOrZombie(t *testing.T) {
+	p := ordinaryKernelProcess()
+	for _, test := range []struct {
+		name                string
+		length, returnedPID int
+		err                 error
+		absent              bool
+	}{
+		{name: "complete alive", length: 64, returnedPID: p.Identity.PID},
+		{name: "zero length absent", returnedPID: 0, absent: true},
+		{name: "raw ESRCH unknown", err: syscall.ESRCH},
+		{name: "real EIO unknown", err: syscall.EIO},
+		{name: "permission unknown", err: syscall.EPERM},
+		{name: "truncated unknown", length: 63, returnedPID: p.Identity.PID},
+		{name: "oversized unknown", length: 65, returnedPID: p.Identity.PID},
+		{name: "reused reply unknown", length: 64, returnedPID: p.Identity.PID + 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateProcessQuery(p.Identity.PID, test.returnedPID, test.length, 64, test.err)
+			if processGone(p, err) != test.absent {
+				t.Fatal("unknown kernel result was misclassified", err)
+			}
+			if test.name != "complete alive" && err == nil {
+				t.Fatal("incomplete kernel query accepted")
+			}
+		})
+	}
+	p.Zombie = true
+	if !processGone(p, nil) || processGone(p, syscall.EPERM) || processGone(p, &pathUnavailableError{PID: p.Identity.PID, Err: syscall.ENOENT}) {
+		t.Fatal("zombie status overrode an unknown query or path error")
+	}
+}
+
+func completeScanOperations(first, second kernelProcess) snapshotOperations {
+	lookup := func(pid int) (kernelProcess, error) {
+		if pid == first.Identity.PID {
+			return first, nil
+		}
+		return second, nil
+	}
+	return snapshotOperations{
+		list: func() ([]kernelProcess, error) { return []kernelProcess{first, second}, nil },
+		identity: func(pid int) (Identity, error) {
+			p, _ := lookup(pid)
+			p.Identity.Path = "/ordinary"
+			return p.Identity, nil
+		},
+		current: lookup,
+		gone:    func(int) bool { return false },
+	}
+}
+
+func TestExitRaceRestartsWholeInventoryAndDiscardsPartialSnapshot(t *testing.T) {
+	first, second := ordinaryKernelProcess(), ordinaryKernelProcess()
+	second.Identity.PID, second.Identity.UID = 81, 502
+	operations := completeScanOperations(first, second)
+	lists, scanned := 0, []int{}
+	operations.list = func() ([]kernelProcess, error) { lists++; return []kernelProcess{first, second}, nil }
+	operations.sockets = func(pid int) ([]SocketKey, error) {
+		scanned = append(scanned, pid)
+		if lists == 1 && pid == second.Identity.PID {
+			return nil, syscall.ESRCH
+		}
+		key := testSocket().Key
+		key.Handle, key.Generation = uint64(pid), uint64(lists)
+		return []SocketKey{key}, nil
+	}
+	snap, err := completeProcessSnapshot(context.Background(), 501, nil, operations)
+	if err != nil || lists != 2 || !slices.Equal(scanned, []int{80, 81, 80, 81}) || len(snap.Sockets) != 2 || len(snap.Processes) != 1 {
+		t.Fatal("exit retry did not repeat the complete inventory", snap, lists, scanned, err)
+	}
+	for _, socket := range snap.Sockets {
+		if socket.Key.Generation != 2 {
+			t.Fatal("partial first observation leaked into the complete result", snap)
+		}
+	}
+}
+
+func TestSnapshotRetryIsBoundedAndDoesNotHideOtherErrors(t *testing.T) {
+	for _, failure := range []error{syscall.ESRCH, syscall.EPERM, syscall.EIO, syscall.EAGAIN, &pathUnavailableError{PID: 80, Err: syscall.ESRCH}} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			first, second := ordinaryKernelProcess(), ordinaryKernelProcess()
+			second.Identity.PID, second.Identity.UID = 81, 502
+			operations := completeScanOperations(first, second)
+			lists := 0
+			operations.list = func() ([]kernelProcess, error) { lists++; return []kernelProcess{first, second}, nil }
+			operations.sockets = func(pid int) ([]SocketKey, error) {
+				if pid == second.Identity.PID {
+					return nil, failure
+				}
+				return []SocketKey{testSocket().Key}, nil
+			}
+			snap, err := completeProcessSnapshot(context.Background(), 501, nil, operations)
+			want := 1
+			if failure == syscall.ESRCH {
+				want = 2
+			}
+			if err == nil || lists != want || len(snap.Processes) != 0 || len(snap.Sockets) != 0 || len(snap.UnresolvedPaths) != 0 {
+				t.Fatal("failed or unknown scan returned partial data or retried too often", snap, lists, err)
+			}
+		})
+	}
+}
+
+func TestSocketExitWithConfirmedZombieDoesNotNeedRetry(t *testing.T) {
+	p := ordinaryKernelProcess()
+	operations := completeScanOperations(p, p)
+	lists := 0
+	operations.list = func() ([]kernelProcess, error) { lists++; return []kernelProcess{p}, nil }
+	operations.sockets = func(int) ([]SocketKey, error) { return nil, syscall.ESRCH }
+	operations.gone = func(int) bool { zombie := p; zombie.Zombie = true; return processGone(zombie, nil) }
+	snap, err := completeProcessSnapshot(context.Background(), 501, nil, operations)
+	if err != nil || lists != 1 || len(snap.Processes) != 0 || len(snap.Sockets) != 0 {
+		t.Fatal("confirmed zombie retained stale descriptors", snap, lists, err)
+	}
+}

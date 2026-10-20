@@ -6,6 +6,7 @@ package wiredguard
 #include <libproc.h>
 #include <sys/proc_info.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 #include <stdlib.h>
 #include <errno.h>
 
@@ -13,6 +14,15 @@ struct wired_socket {
     unsigned long long handle, pcb, generation;
     int family, protocol;
 };
+
+static long long wired_process(int pid, void *out, size_t capacity) {
+    int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+    if (capacity != sizeof(struct kinfo_proc)) { errno = EOVERFLOW; return -1; }
+    size_t length = capacity;
+    errno = 0;
+    if (sysctl(mib, 4, out, &length, NULL, 0) != 0) return -1;
+    return (long long)length;
+}
 
 static int wired_sockets(int pid, struct wired_socket *out, int capacity) {
     errno = 0;
@@ -23,15 +33,27 @@ static int wired_sockets(int pid, struct wired_socket *out, int capacity) {
     int allocated = bytes + 32 * sizeof(struct proc_fdinfo);
     struct proc_fdinfo *fds = malloc(allocated);
     if (!fds) { errno = ENOMEM; return -1; }
+    errno = 0;
     bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, allocated);
-    if (bytes <= 0 || bytes == allocated) { free(fds); errno = EAGAIN; return -1; }
+    if (bytes <= 0 || bytes == allocated) {
+        int saved = errno;
+        free(fds);
+        errno = saved != 0 ? saved : EAGAIN;
+        return -1;
+    }
     int used = 0;
     for (int i = 0; i < bytes / (int)sizeof(struct proc_fdinfo); i++) {
         if (fds[i].proc_fdtype != PROX_FDTYPE_SOCKET) continue;
         struct socket_fdinfo info;
         errno = 0;
         int n = proc_pidfdinfo(pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &info, sizeof(info));
-        if (n != sizeof(info)) { if (errno == EBADF || errno == ENOENT) continue; free(fds); return -1; }
+        if (n != sizeof(info)) {
+            int saved = errno;
+            if (saved == EBADF || saved == ENOENT) continue;
+            free(fds);
+            errno = saved != 0 ? saved : EIO;
+            return -1;
+        }
         if (info.psi.soi_family != AF_INET && info.psi.soi_family != AF_INET6) continue;
         if (used == capacity) { free(fds); errno = EOVERFLOW; return -1; }
         out[used].handle = info.psi.soi_so;
@@ -54,14 +76,13 @@ import "C"
 import (
 	"context"
 	"errors"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
 func nativeSnapshot(ctx context.Context, uid uint32, state *State) (Snapshot, error) {
-	return processSnapshot(ctx, uid, state, snapshotOperations{list: nativeProcessList, identity: nativeIdentity, sockets: nativeSockets, current: nativeProcess, gone: gone})
+	return completeProcessSnapshot(ctx, uid, state, snapshotOperations{list: nativeProcessList, identity: nativeIdentity, sockets: nativeSockets, current: nativeProcess, gone: gone})
 }
 
 func nativeProcessList() ([]kernelProcess, error) {
@@ -80,11 +101,12 @@ func nativeProcessList() ([]kernelProcess, error) {
 }
 
 func nativeProcess(pid int) (kernelProcess, error) {
-	p, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-	if err != nil {
+	var p unix.KinfoProc
+	length, err := C.wired_process(C.int(pid), unsafe.Pointer(&p), C.size_t(unsafe.Sizeof(p)))
+	if err = validateProcessQuery(pid, int(p.Proc.P_pid), int(length), int(unsafe.Sizeof(p)), err); err != nil {
 		return kernelProcess{}, err
 	}
-	return kernelIdentity(*p), nil
+	return kernelIdentity(p), nil
 }
 
 func kernelIdentity(p unix.KinfoProc) kernelProcess {
@@ -119,8 +141,8 @@ func processCredentials(p unix.KinfoProc) Identity {
 }
 
 func gone(pid int) bool {
-	_, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-	return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EIO)
+	p, err := nativeProcess(pid)
+	return processGone(p, err)
 }
 
 func nativeIdentity(pid int) (Identity, error) {

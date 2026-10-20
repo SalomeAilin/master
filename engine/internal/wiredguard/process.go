@@ -68,6 +68,42 @@ func ordinaryPathFallback(p kernelProcess, uid uint32, s *State) bool {
 	return p.Identity.UID == uid && !protectedProcess(p, s)
 }
 
+var errProcessAbsent = errors.New("kernel process query confirmed no process")
+
+func validateProcessQuery(pid, returnedPID, length, expected int, err error) error {
+	if err != nil {
+		return err
+	}
+	if length == 0 {
+		return errProcessAbsent
+	}
+	if length != expected || returnedPID != pid {
+		return errors.New("incomplete or mismatched kernel process reply")
+	}
+	return nil
+}
+
+func processGone(p kernelProcess, err error) bool {
+	return (err == nil && p.Zombie) || errors.Is(err, errProcessAbsent)
+}
+
+// A process can exit between the inventory and its descriptor query. Restart
+// once from a fresh inventory; no caller may observe or prune from a partial scan.
+func completeProcessSnapshot(ctx context.Context, uid uint32, state *State, operations snapshotOperations) (Snapshot, error) {
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return Snapshot{}, err
+		}
+		snap, err := processSnapshot(ctx, uid, state, operations)
+		if err == nil {
+			return snap, nil
+		}
+		if attempt == 1 || !errors.Is(err, syscall.ESRCH) {
+			return Snapshot{}, err
+		}
+	}
+}
+
 func readProcessIdentity(pid int, current func(int) (kernelProcess, error), path func(int) (string, error), gone func(int) bool) (Identity, error) {
 	p, err := current(pid)
 	if err != nil {
