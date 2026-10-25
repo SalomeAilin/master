@@ -180,6 +180,7 @@ func TestFailureLogPreservesBoundedSingleLineError(t *testing.T) {
 		t.Run(message[:min(len(message), 32)], func(t *testing.T) {
 			r, now, result, _, repairs := runnerFixture(t)
 			result.Err = errors.New(message)
+			result.Phase = "dns"
 			if err := r.RunOnce(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -194,10 +195,47 @@ func TestFailureLogPreservesBoundedSingleLineError(t *testing.T) {
 			if !strings.Contains(string(data), "error="+strconv.Quote(want)) || strings.Contains(string(data), "\nforged entry") {
 				t.Fatalf("missing or unsafe error detail: %s", data)
 			}
+			if !strings.Contains(string(data), `phase="dns"`) {
+				t.Fatal(string(data))
+			}
 			if state := readState(t, r, *now); state.Failures != 1 || *repairs != 0 {
 				t.Fatalf("diagnostics changed failure handling: state=%+v repairs=%d", state, *repairs)
 			}
 		})
+	}
+}
+
+func TestProbeIdentifiesResponseTimeoutPhase(t *testing.T) {
+	for _, stage := range []string{"response_headers", "response_body"} {
+		t.Run(stage, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if stage == "response_body" {
+					w.WriteHeader(http.StatusOK)
+					w.(http.Flusher).Flush()
+				}
+				<-r.Context().Done()
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			defer cancel()
+			got := Probe(ctx, server.URL)
+			if got.Err == nil || got.Phase != stage {
+				t.Fatalf("phase=%q error=%v", got.Phase, got.Err)
+			}
+		})
+	}
+}
+
+func TestProbeIdentifiesTCPAndTLSFailures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	server.Close()
+	if got := Probe(context.Background(), server.URL); got.Err == nil || got.Phase != "tcp" {
+		t.Fatalf("TCP failure not identified: %+v", got)
+	}
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer tlsServer.Close()
+	if got := Probe(context.Background(), tlsServer.URL); got.Err == nil || got.Phase != "tls" {
+		t.Fatalf("TLS failure not identified: %+v", got)
 	}
 }
 

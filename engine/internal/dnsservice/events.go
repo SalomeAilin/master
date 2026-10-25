@@ -73,7 +73,12 @@ func (l *QueryLogger) Write(q, m *dns.Msg, client string, cached bool, elapsed t
 	prefix := fmt.Sprintf("network-dns[%d]: %d %s ", os.Getpid(), id, client)
 	name := strings.TrimSuffix(q.Question[0].Name, ".")
 	var batch strings.Builder
-	fmt.Fprintf(&batch, "%squery[TYPE%d] %s from %s\n", prefix, q.Question[0].Qtype, name, client)
+	code := -1
+	if m != nil {
+		code = m.Rcode
+	}
+	// Replies share this query ID; one timestamp per batch preserves the size cap.
+	fmt.Fprintf(&batch, "%s %squery[TYPE%d] %s from %s rcode=%d elapsed_ms=%d cached=%t\n", time.Now().UTC().Format(time.RFC3339Nano), prefix, q.Question[0].Qtype, name, client, code, elapsed.Milliseconds(), cached)
 	kind := "reply"
 	if cached {
 		kind = "cached"

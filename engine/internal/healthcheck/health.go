@@ -26,6 +26,7 @@ type Result struct {
 	Status            int
 	ElapsedMS         int64
 	RemoteIP, LocalIP string
+	Phase             string
 	Err               error
 }
 
@@ -45,14 +46,24 @@ type Runner struct {
 
 func Probe(ctx context.Context, target string) Result {
 	started := time.Now()
-	result := Result{}
+	result := Result{Phase: "request"}
 	var mu sync.Mutex
-	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+	phase := func(value string) {
 		mu.Lock()
-		defer mu.Unlock()
-		result.RemoteIP, _, _ = net.SplitHostPort(info.Conn.RemoteAddr().String())
-		result.LocalIP, _, _ = net.SplitHostPort(info.Conn.LocalAddr().String())
-	}}
+		result.Phase = value
+		mu.Unlock()
+	}
+	trace := &httptrace.ClientTrace{
+		DNSStart:          func(httptrace.DNSStartInfo) { phase("dns") },
+		ConnectStart:      func(string, string) { phase("tcp") },
+		TLSHandshakeStart: func() { phase("tls") },
+		GotConn: func(info httptrace.GotConnInfo) {
+			mu.Lock()
+			defer mu.Unlock()
+			result.Phase = "response_headers"
+			result.RemoteIP, _, _ = net.SplitHostPort(info.Conn.RemoteAddr().String())
+			result.LocalIP, _, _ = net.SplitHostPort(info.Conn.LocalAddr().String())
+		}}
 	ctx, cancel := context.WithTimeout(httptrace.WithClientTrace(ctx, trace), 10*time.Second)
 	defer cancel()
 	dialer := &net.Dialer{Timeout: 4 * time.Second}
@@ -74,6 +85,7 @@ func Probe(ctx context.Context, target string) Result {
 		response, err = client.Do(request)
 		if err == nil {
 			result.Status = response.StatusCode
+			phase("response_body")
 			var size int64
 			size, err = io.Copy(io.Discard, io.LimitReader(response.Body, (4<<20)+1))
 			response.Body.Close()
@@ -85,6 +97,9 @@ func Probe(ctx context.Context, target string) Result {
 	mu.Lock()
 	defer mu.Unlock()
 	result.Err, result.ElapsedMS = err, time.Since(started).Round(time.Millisecond).Milliseconds()
+	if err == nil {
+		result.Phase = "complete"
+	}
 	return result
 }
 
@@ -244,7 +259,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 				detail = detail[:1024] + "..."
 			}
 		}
-		if err := r.Logf("unhealthy backend=go ip=%s local_ip=%s reason=%s http=%d time_ms=%d failures=%d error=%q", outcome.RemoteIP, outcome.LocalIP, outcome.Reason, outcome.Status, outcome.ElapsedMS, state.Failures, detail); err != nil {
+		if err := r.Logf("unhealthy backend=go ip=%s local_ip=%s reason=%s http=%d time_ms=%d failures=%d phase=%q error=%q", outcome.RemoteIP, outcome.LocalIP, outcome.Reason, outcome.Status, outcome.ElapsedMS, state.Failures, outcome.Phase, detail); err != nil {
 			return err
 		}
 		if outcome.Drift {

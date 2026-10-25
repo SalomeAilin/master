@@ -59,7 +59,7 @@ func TestCNAMEChainStaysWithItsQueryNotSharedCDN(t *testing.T) {
 func TestNativeDNSQueryAndCachedAnswersUseTheSameCorrelation(t *testing.T) {
 	c, bound, _ := correlator()
 	for _, text := range []string{
-		"network-dns[7]: 1 127.0.0.1:4000 query[TYPE1] good.cn from 127.0.0.1:4000",
+		"2026-10-25T14:00:00Z network-dns[7]: 1 127.0.0.1:4000 query[TYPE1] good.cn from 127.0.0.1:4000 rcode=0 elapsed_ms=1 cached=true",
 		"network-dns[7]: 1 127.0.0.1:4000 cached good.cn is 223.5.5.5",
 		"network-dns[7]: 2 127.0.0.1:4000 query[TYPE1] foreign.test from 127.0.0.1:4000",
 		"network-dns[7]: 2 127.0.0.1:4000 reply foreign.test is 223.5.5.5",

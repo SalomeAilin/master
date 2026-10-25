@@ -411,6 +411,30 @@ func TestQueryLogRecordsOnlySlowAnswerDurations(t *testing.T) {
 	}
 }
 
+func TestQueryLogRecordsTimeAndNegativeResponse(t *testing.T) {
+	for _, code := range []int{dns.RcodeSuccess, dns.RcodeNameError, dns.RcodeServerFailure} {
+		path := filepath.Join(t.TempDir(), "query.log")
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		q := question("example.test.", dns.TypeA)
+		l := &QueryLogger{Path: path}
+		if err := l.Write(q, responseFor(q, code), "127.0.0.1:123", false, 12*time.Millisecond, nil); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, strings.Fields(string(data))[0]); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), fmt.Sprintf("rcode=%d elapsed_ms=12 cached=false", code)) {
+			t.Fatal(string(data))
+		}
+	}
+}
+
 func TestQueryLogBoundsGrowthAndRestrictsCNAMEAttribution(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "query.log")
