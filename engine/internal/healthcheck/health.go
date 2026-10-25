@@ -236,7 +236,15 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		state.Failures = 0
 	} else {
 		state.Failures = min(state.Failures+1, 1000000)
-		if err := r.Logf("unhealthy backend=go ip=%s local_ip=%s reason=%s http=%d time_ms=%d failures=%d", outcome.RemoteIP, outcome.LocalIP, outcome.Reason, outcome.Status, outcome.ElapsedMS, state.Failures); err != nil {
+		detail := ""
+		if outcome.Err != nil {
+			// Bound diagnostic output and quote it below so errors cannot add log lines.
+			detail = outcome.Err.Error()
+			if len(detail) > 1024 {
+				detail = detail[:1024] + "..."
+			}
+		}
+		if err := r.Logf("unhealthy backend=go ip=%s local_ip=%s reason=%s http=%d time_ms=%d failures=%d error=%q", outcome.RemoteIP, outcome.LocalIP, outcome.Reason, outcome.Status, outcome.ElapsedMS, state.Failures, detail); err != nil {
 			return err
 		}
 		if outcome.Drift {

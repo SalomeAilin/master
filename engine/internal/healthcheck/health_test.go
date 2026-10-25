@@ -175,6 +175,32 @@ func readState(t *testing.T, r *Runner, now int64) State {
 	return s
 }
 
+func TestFailureLogPreservesBoundedSingleLineError(t *testing.T) {
+	for _, message := range []string{"lookup example.test: no such host", "dial tcp: i/o timeout", "TLS handshake timeout\nforged entry", strings.Repeat("x", 2048)} {
+		t.Run(message[:min(len(message), 32)], func(t *testing.T) {
+			r, now, result, _, repairs := runnerFixture(t)
+			result.Err = errors.New(message)
+			if err := r.RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(r.LogPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := message
+			if len(want) > 1024 {
+				want = want[:1024] + "..."
+			}
+			if !strings.Contains(string(data), "error="+strconv.Quote(want)) || strings.Contains(string(data), "\nforged entry") {
+				t.Fatalf("missing or unsafe error detail: %s", data)
+			}
+			if state := readState(t, r, *now); state.Failures != 1 || *repairs != 0 {
+				t.Fatalf("diagnostics changed failure handling: state=%+v repairs=%d", state, *repairs)
+			}
+		})
+	}
+}
+
 func TestOneHourReplayAndFailureRecovery(t *testing.T) {
 	r, now, result, probes, repairs := runnerFixture(t)
 	for value := int64(1000); value <= 4600; value += 30 {
