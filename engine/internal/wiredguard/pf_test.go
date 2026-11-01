@@ -81,6 +81,44 @@ func TestPFRejectsStatesSkipsPassesAndTranslationBypasses(t *testing.T) {
 	}
 }
 
+func TestPFAllowsOnlyExactApplicationFirewallEchoAndScrubRules(t *testing.T) {
+	const anchor = "com.apple/250.ApplicationFirewall"
+	const scrub = "scrub in all fragment reassemble"
+	const ipv4 = "block drop in quick inet proto icmp all icmp-type echoreq"
+	const ipv6 = "block drop in quick inet6 proto ipv6-icmp all icmp6-type echoreq"
+	p := safePF()
+	p.Filters[anchor] = strings.Join([]string{scrub, ipv4, ipv4, ipv6}, "\n")
+	if err := ValidatePF(p, ""); err != nil {
+		t.Fatal("exact application firewall rules rejected", err)
+	}
+	for name, rules := range map[string]string{
+		"pass instead of block": strings.Replace(ipv4, "block drop", "pass", 1),
+		"outbound block":        strings.Replace(ipv4, " in ", " out ", 1),
+		"different protocol":    strings.Replace(ipv4, "proto icmp", "proto tcp", 1),
+		"different ICMP type":   strings.Replace(ipv4, "echoreq", "echorep", 1),
+		"different IPv6 type":   strings.Replace(ipv6, "echoreq", "echorep", 1),
+		"extra route":           ipv4 + " route-to (en1 192.0.2.1)",
+		"extra label":           ipv4 + " label other",
+		"modified scrub":        scrub + " no-df",
+		"quoted tokens":         strings.Replace(scrub, "in", `"in"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := safePF()
+			p.Filters[anchor] = rules
+			if err := ValidatePF(p, ""); err == nil {
+				t.Fatal("unexpected application firewall rule accepted", rules)
+			}
+		})
+	}
+	for _, rule := range []string{scrub, ipv4, ipv6} {
+		p := safePF()
+		p.Filters["com.apple/other"] = rule
+		if err := ValidatePF(p, ""); err == nil {
+			t.Fatal("exception applied to a different anchor", rule)
+		}
+	}
+}
+
 func TestLoadedRulesCannotAddAnAllowOrLoseCredentials(t *testing.T) {
 	s := activeState()
 	rules := testRules(t, s)

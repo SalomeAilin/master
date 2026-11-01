@@ -41,7 +41,7 @@ sudo /usr/local/libexec/network-domain-engine wired-app start -uid "$(id -u)"
 
 会话使用现有配置中经过交叉核对的 Ethernet/LAN 接口。临时代理的连接和 DoH 通过内核 `IP_BOUND_IF` 绑定该接口，关闭 Multipath TCP；原生辅助程序的受控 IPv4 TCP 只允许在该有线接口双向收发，其余接口、IPv6 和 UDP 双向阻断。PF 不改变路由选择，原生连接选到其他接口时仍会失败。临时代理监听 `127.0.0.1:17891`，由 root 预绑定并把同一个监听 socket 交给 nobody，不释放端口后重新绑定；出网 socket 由低权限代理创建。PF 允许受控 UID/GID 连接该端口，并要求入站服务 socket 保持 root 创建的凭据；有线及四个回环方向均不创建 state，其他本机代理仍被阻断。百度网盘内的 HTTP 代理需设为这个地址。
 
-PF 检查采取严格的支持范围：主过滤规则须能到达现有 `com.apple/*` 入口，不能跳过接口，不能有本功能之外的 pass、quick、转换旁路或既存 state。遇到不兼容规则会拒绝，不重载全局规则、不清空连接。专用规则放在 `com.apple/000.network-domain-wired-app`；只释放本会话的 PF token。管理员须验证本机 listener/accept 的 PF 凭据行为、进程身份和 socket 句柄持有者；离线测试不能代替这些验证。
+PF 检查采取严格的支持范围：主过滤规则须能到达现有 `com.apple/*` 入口，不能跳过接口，不能有本功能之外的 pass、转换旁路或既存 state。唯一接受的外部 quick 规则是 `com.apple/250.ApplicationFirewall` 中精确匹配的入站 IPv4 和 IPv6 ICMP echo 请求阻断；同一 anchor 也接受精确匹配的入站分片重组规则。其他 quick 或未知规则仍拒绝。程序不重载全局规则、不清空连接。专用规则放在 `com.apple/000.network-domain-wired-app`；只释放本会话的 PF token。管理员须验证本机 listener/accept 的 PF 凭据行为、进程身份和 socket 句柄持有者；离线测试不能代替这些验证。
 
 `start` 在前台管理本次会话。应用及 helper 都退出，控制器已见的 socket 对象在两次完整扫描中均无持有者后，才撤销规则和退出；代理故障或控制进程中断时保留 PF。仍有应用、已见 socket 被其他进程持有、身份不明或检查失败时不解除阻断。可用下列命令检查、恢复或在手动关闭应用后释放：
 

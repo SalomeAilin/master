@@ -54,6 +54,16 @@ func ValidatePF(p PFSnapshot, ownRules string) error {
 			continue
 		}
 		for _, line := range nonemptyLines(rules) {
+			// The application firewall may normalize inbound fragments and
+			// drop echo requests. These exact rules cannot pass TCP or UDP.
+			if anchor == "com.apple/250.ApplicationFirewall" {
+				switch strings.Join(strings.Fields(line), " ") {
+				case "scrub in all fragment reassemble",
+					"block drop in quick inet proto icmp all icmp-type echoreq",
+					"block drop in quick inet6 proto ipv6-icmp all icmp6-type echoreq":
+					continue
+				}
+			}
 			text := " " + compact(line) + " "
 			for _, word := range []string{"quick", "route-to", "reply-to", "dup-to", "divert-to", "skip", "floating"} {
 				if strings.Contains(text, " "+word+" ") {
