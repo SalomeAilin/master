@@ -13,7 +13,7 @@ import (
 
 func Run(ctx context.Context, args []string) error {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Println("wired-app: plan | preflight | open | start | status | evidence | recover | release [-uid <existing-user-id>]")
+		fmt.Println("wired-app: plan | preflight | open | start | status | evidence | recover | recover-reboot | release [-uid <existing-user-id>]")
 		fmt.Println("start requires the installed engine, administrator authorization, and all existing Baidu processes closed. No daemon is installed.")
 		fmt.Println("open reuses a verified session for the same user or starts a new foreground session. Direct application launches are not covered.")
 		fmt.Println("evidence samples the proxy and controlled app processes three times, with private PF counters and recent proxy logs in JSON.")
@@ -21,7 +21,7 @@ func Run(ctx context.Context, args []string) error {
 	}
 	action := args[0]
 	switch action {
-	case "plan", "preflight", "open", "start", "status", "evidence", "recover", "release", "_launch":
+	case "plan", "preflight", "open", "start", "status", "evidence", "recover", "recover-reboot", "release", "_launch":
 	default:
 		return errors.New("unknown wired-app action")
 	}
@@ -178,7 +178,11 @@ func Run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		state = State{Version: 1, UID: account.UID, GID: gid, Phase: "reserved", Wired: wired}
+		bootID, _, bootErr := bootIdentity()
+		if bootErr != nil {
+			return bootErr
+		}
+		state = State{Version: 1, BootID: bootID, UID: account.UID, GID: gid, Phase: "reserved", Wired: wired}
 		controller := Controller{System: native}
 		if err = controller.Start(ctx, &state); err != nil {
 			return err
@@ -236,6 +240,13 @@ func Run(ctx context.Context, args []string) error {
 		return err
 	}
 	controller := Controller{System: &Native{Store: store, Account: account}}
+	if action == "recover-reboot" {
+		archive, recoverErr := (&Native{Store: store, Account: account}).recoverReboot(ctx, state)
+		if recoverErr != nil {
+			return recoverErr
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"session": "archived", "record": archive, "pf_changed": false, "cache_removed": false})
+	}
 	if action == "recover" {
 		return controller.Recover(ctx, &state)
 	}
@@ -252,6 +263,16 @@ func errorText(err error) string {
 // LockForUpgrade serializes the entire upgrade with session creation. A read
 // followed by a separate deployment lock would leave a start/upgrade race.
 func LockForUpgrade() (func(), error) {
+	return lockForUpgrade(context.Background(), false)
+}
+
+// LockForUpgradeAfterReboot is an explicit administrative action; the lock is
+// held across the stale-record check, archive, and the entire upgrade.
+func LockForUpgradeAfterReboot(ctx context.Context) (func(), error) {
+	return lockForUpgrade(ctx, true)
+}
+
+func lockForUpgrade(ctx context.Context, recoverReboot bool) (func(), error) {
 	if os.Geteuid() != 0 {
 		return nil, errors.New("administrator authorization is required for upgrade")
 	}
@@ -260,13 +281,28 @@ func LockForUpgrade() (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = store.Read()
+	state, err := store.Read()
 	if os.IsNotExist(err) {
 		return release, nil
 	}
-	release()
 	if err != nil {
+		release()
 		return nil, fmt.Errorf("cannot establish wired session state before upgrade: %w", err)
 	}
+	if recoverReboot {
+		account, accountErr := LookupAccount(state.UID)
+		if accountErr != nil {
+			release()
+			return nil, accountErr
+		}
+		archive, recoveryErr := (&Native{Store: store, Account: account}).recoverReboot(ctx, state)
+		if recoveryErr != nil {
+			release()
+			return nil, fmt.Errorf("wired reboot recovery refused: %w", recoveryErr)
+		}
+		fmt.Fprintf(os.Stdout, "Previous wired session archived at %s; PF and cache unchanged.\n", archive)
+		return release, nil
+	}
+	release()
 	return nil, errors.New("wired-app session exists; close its controlled app and release it before upgrading")
 }

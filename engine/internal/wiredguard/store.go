@@ -130,6 +130,35 @@ func (s Store) Remove() error {
 	return os.Remove(filepath.Join(s.Path, "session.json"))
 }
 
+// Archive keeps the old record for inspection and does not touch its cache.
+// Callers must hold the session lock and establish that the record is stale.
+func (s Store) Archive() (string, error) {
+	f, err := s.open("session.json")
+	if err != nil {
+		return "", err
+	}
+	f.Close()
+	dst, err := os.CreateTemp(s.Path, "session-before-reboot-")
+	if err != nil {
+		return "", err
+	}
+	name := dst.Name()
+	if err = dst.Close(); err != nil {
+		os.Remove(name)
+		return "", err
+	}
+	if err = os.Rename(filepath.Join(s.Path, "session.json"), name); err != nil {
+		os.Remove(name)
+		return "", err
+	}
+	dir, err := os.Open(s.Path)
+	if err != nil {
+		return name, err
+	}
+	defer dir.Close()
+	return name, dir.Sync()
+}
+
 func (s Store) Lock() (func(), error) {
 	if err := s.directory(true); err != nil {
 		return nil, err

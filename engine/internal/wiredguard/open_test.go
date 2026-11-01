@@ -70,6 +70,11 @@ func TestReopenSessionComparisonAllowsOnlyObservationChanges(t *testing.T) {
 		t.Fatal("changed barrier accepted")
 	}
 	b = a
+	b.BootID = oldBoot
+	if sameSession(a, b) {
+		t.Fatal("changed boot identity accepted")
+	}
+	b = a
 	app := *a.App
 	app.Started++
 	b.App = &app

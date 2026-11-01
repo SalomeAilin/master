@@ -47,6 +47,7 @@ func applicationCommand(args []string) (bool, error) {
 	case "upgrade":
 		flags := flag.NewFlagSet("upgrade", flag.ContinueOnError)
 		native := flags.Bool("native-dns", false, "replace the external DNS backend")
+		recoverWired := flags.Bool("recover-wired-after-reboot", false, "archive a verified stale wired session before upgrading")
 		if err := flags.Parse(args[1:]); err != nil {
 			return true, err
 		}
@@ -54,7 +55,11 @@ func applicationCommand(args []string) (bool, error) {
 			return true, errors.New("usage: network-domain-engine upgrade [-native-dns] [service.json]")
 		}
 		var releaseWired func()
-		releaseWired, err = wiredguard.LockForUpgrade()
+		if *recoverWired {
+			releaseWired, err = wiredguard.LockForUpgradeAfterReboot(ctx)
+		} else {
+			releaseWired, err = wiredguard.LockForUpgrade()
+		}
 		if err != nil {
 			return true, err
 		}

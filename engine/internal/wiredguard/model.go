@@ -65,6 +65,7 @@ type Account struct {
 
 type State struct {
 	Version                  int         `json:"version"`
+	BootID                   string      `json:"boot_id,omitempty"`
 	UID                      uint32      `json:"uid"`
 	GID                      uint32      `json:"gid"`
 	Phase                    string      `json:"phase"`
@@ -87,6 +88,9 @@ func (s State) Validate() error {
 	}
 	if !regexp.MustCompile(`^en[0-9]+$`).MatchString(s.Wired) {
 		return errors.New("invalid physical wired interface")
+	}
+	if s.BootID != "" && !validBootID(s.BootID) {
+		return errors.New("invalid boot session identity")
 	}
 	switch s.Phase {
 	case "reserved", "enabled", "barrier", "proxy", "launching", "active", "held", "releasing", "cleared", "released":

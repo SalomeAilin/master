@@ -78,7 +78,7 @@ func reusableSession(s State, uid uint32, controller Identity, snap Snapshot) er
 // Socket observations can grow while reopening; stable launch identities and
 // the barrier must still describe exactly the same session.
 func sameSession(a, b State) bool {
-	if a.UID != b.UID || a.GID != b.GID || a.Phase != b.Phase || a.Token != b.Token || a.RuleHash != b.RuleHash || a.Wired != b.Wired || a.Cache != b.Cache || a.LaunchPending != b.LaunchPending || a.SocketObservationStarted != b.SocketObservationStarted || a.LastError != b.LastError {
+	if a.BootID != b.BootID || a.UID != b.UID || a.GID != b.GID || a.Phase != b.Phase || a.Token != b.Token || a.RuleHash != b.RuleHash || a.Wired != b.Wired || a.Cache != b.Cache || a.LaunchPending != b.LaunchPending || a.SocketObservationStarted != b.SocketObservationStarted || a.LastError != b.LastError {
 		return false
 	}
 	for _, pair := range [][2]*Identity{{a.App, b.App}, {a.Proxy, b.Proxy}, {a.Launcher, b.Launcher}} {

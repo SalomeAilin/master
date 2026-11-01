@@ -12,7 +12,7 @@ import (
 	"syscall"
 )
 
-const version = "0.3.11-wired-app"
+const version = "0.3.12-wired-recovery"
 
 func command(arguments []string) error {
 	if len(arguments) == 0 || len(arguments) == 1 && (arguments[0] == "--help" || arguments[0] == "-h") {
